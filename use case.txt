@@ -1,0 +1,51 @@
+PIXELS DASHBOARD: USE CASES AND FLOW
+
+1. Startup and data
+- The dashboard loads projects with their milestones, tasks, and deliverables from Supabase.
+- Employee records and calendar events are loaded alongside projects.
+- The selected theme is read from browser storage and applied to the document.
+
+2. Home
+- Home summarizes client, active-project, and waiting-task counts.
+- Today's list shows open tasks due today.
+- Upcoming events combines future task due dates, milestone dates, and calendar events.
+- Selecting a client opens that client's workspace. Selecting a task opens its client task view.
+- Quick actions start client creation, calendar-event creation, or the task list.
+
+3. Tasks
+- The task list combines tasks from all loaded projects.
+- The All, To do, Doing, and Done filters narrow the list; search matches task and client names.
+- Each row shows the task, client, assignee, due date, phase, and created date on wide screens. On mobile it keeps the task, client, and due date together in a compact row.
+- Selecting a task opens its client workspace with that task highlighted. The status control toggles task completion.
+
+4. Updates
+- Updates combines task and milestone activity across clients and sorts newest timestamps first.
+- Each entry shows its title, client, status, and available update or creation time.
+- Selecting an entry opens the corresponding client workspace.
+
+5. Calendar
+- The main Calendar opens with task due dates only.
+- Its item-type selector can show milestones, saved calendar events, tasks plus milestones, tasks plus events, or all calendar items.
+- Month controls move through the calendar; Today returns to the current month.
+- Add event saves a title, date, optional client, and notes to the calendar-events table.
+- Selecting a task opens its task view. Selecting a client event or milestone opens that client's workspace.
+- The project board no longer has a second Calendar view.
+
+6. Client workspace
+- Selecting a client opens Dashboard, Documents, or Deliverables from the project navigation on desktop and mobile.
+- Documents contains the client's feedback, agreement, and scope-of-work links, or an empty state when none are configured.
+- Deliverables contains folders, uploaded files, links, search, grid/list views, and file-version history. The project board's Deliverables tab opens its file tree separately from the task board.
+- At the Deliverables root, file-type filters and search can find matching items in nested folders; opening a folder limits browsing to that folder.
+- The client portal dashboard reports milestone completion and status. Its roadmap labels milestones Completed, In progress, or Not started. Clients do not get a Tasks tab.
+- Clients can still submit project requests from the Request action.
+
+7. Clients and team
+- All Clients lists project workspaces and provides the create-client workflow.
+- Processes and Team show the corresponding project and employee information.
+- The mobile bottom navigation provides Home, Tasks, Calendar, Clients, and Team entry points.
+
+8. Theme and responsive behavior
+- The theme button switches between light and dark mode; the choice persists after refresh.
+- The theme control is available from the desktop sidebar, collapsed sidebar, and mobile header.
+- Layouts reflow for narrow screens: task rows stay compact, calendar cells constrain event text, and library cards and dialogs fit the viewport.
+- The client request dialog wraps its attachment and submit controls on narrow screens.

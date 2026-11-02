@@ -5,6 +5,8 @@ import {
   uploadRequestAttachment,
 } from "../lib/supabase";
 import {
+  LayoutDashboard,
+  Library,
   MessageSquare,
   FileText,
   Link2,
@@ -35,6 +37,7 @@ import {
   History,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import ClientLibrary from "./ClientLibrary";
 
 const VERSION_COLORS = [
   { solid: "bg-blue-600", soft: "bg-blue-50 text-blue-600 hover:bg-blue-100" },
@@ -88,6 +91,7 @@ export default function ClientPortal({
   onRefresh,
 }) {
   const [activeProjectTab, setActiveProjectTab] = useState("tracker");
+  const [activePortalView, setActivePortalView] = useState("dashboard");
 
   const [assetType, setAssetType] = useState("link"); // 'link' | 'file'
   const [title, setTitle] = useState("");
@@ -212,7 +216,6 @@ export default function ClientPortal({
       .from("project_folders")
       .select("*")
       .eq("project_id", project.id)
-      .eq("tab_id", activeProjectTab)
       .order("created_at", { ascending: true });
 
     if (error) {
@@ -361,21 +364,30 @@ export default function ClientPortal({
     return linkVersionsCache[link.key]?.[selectedV]?.url || link.url;
   };
 
-  const allTasks = project?.tasks || [];
   const allMilestones = project?.milestones || [];
   const customTabs = project?.custom_tabs || [];
+  const isProjectTabView =
+    activePortalView === "dashboard" ||
+    customTabs.some((tab) => tab.id === activePortalView);
 
   const currentTabId = activeProjectTab;
-  const tasks = allTasks.filter(
-    (t) => (t.tab_id || "tracker") === currentTabId,
-  );
   const milestones = allMilestones.filter(
     (m) => (m.tab_id || "tracker") === currentTabId,
+  );
+  const isMilestoneComplete = (milestone) =>
+    milestone.status === "complete" ||
+    milestone.status === "done" ||
+    Number(milestone.sheet_progress) >= 100;
+  const completedMilestones = milestones.filter(isMilestoneComplete);
+  const inProgressMilestones = milestones.filter(
+    (milestone) =>
+      !isMilestoneComplete(milestone) && Number(milestone.sheet_progress) > 0,
   );
 
   const currentTabDeliverables = (project?.deliverables || []).filter(
     (item) => (item.tab_id || "tracker") === currentTabId,
   );
+  const libraryDeliverables = project?.deliverables || [];
 
   // --- GLOBAL VERSION LOGIC ---
   const maxGlobalVersion = useMemo(() => {
@@ -437,24 +449,17 @@ export default function ClientPortal({
   };
 
   const completionPct = useMemo(() => {
-    if (milestones.length === 0) {
-      const doneTasks = tasks.filter((t) => t.status === "done").length;
-      const totalTasks = tasks.length || 1;
-      return Math.round((doneTasks / totalTasks) * 100);
-    }
-    
-    // Sum the true progress (0-100) of each milestone and divide by total milestones
+    if (milestones.length === 0) return 0;
+
     const totalProgress = milestones.reduce((acc, m) => {
-      // If manually marked complete, force 100. Otherwise, use the sheet_progress number.
-      const progress = m.status === "complete" ? 100 : (Number(m.sheet_progress) || 0);
+      const progress = isMilestoneComplete(m)
+        ? 100
+        : Number(m.sheet_progress) || 0;
       return acc + progress;
     }, 0);
 
     return Math.round(totalProgress / milestones.length);
-  }, [milestones, tasks]);
-
-  const doneTasks = tasks.filter((t) => t.status === "done").length;
-  const inProgressTasks = tasks.filter((t) => t.status === "progress").length;
+  }, [milestones]);
 
   useEffect(() => {
     if (propEmployees.length > 0) {
@@ -523,6 +528,41 @@ export default function ClientPortal({
 
     setNewFolderName("");
     setIsCreateFolderModalOpen(false);
+    await fetchProjectFolders();
+  };
+
+  const handleRenameFolder = async (folder) => {
+    const nextName = window.prompt("Rename folder", folder.name);
+    if (!nextName?.trim() || nextName.trim() === folder.name) return;
+
+    const { error } = await supabase
+      .from("project_folders")
+      .update({ name: nextName.trim() })
+      .eq("id", folder.id);
+    if (error) {
+      alert(`Could not rename folder: ${error.message}`);
+      return;
+    }
+    await fetchProjectFolders();
+  };
+
+  const handleDeleteFolder = async (folder) => {
+    const hasChildren = projectFolders.some((item) => item.parent_id === folder.id);
+    const hasAssets = libraryDeliverables.some((item) => item.folder_id === folder.id);
+    if (hasChildren || hasAssets) {
+      alert("Move or remove the folder contents before deleting this folder.");
+      return;
+    }
+    if (!window.confirm(`Delete the empty folder "${folder.name}"?`)) return;
+
+    const { error } = await supabase
+      .from("project_folders")
+      .delete()
+      .eq("id", folder.id);
+    if (error) {
+      alert(`Could not delete folder: ${error.message}`);
+      return;
+    }
     await fetchProjectFolders();
   };
 
@@ -716,20 +756,135 @@ export default function ClientPortal({
     emp.name?.toLowerCase().includes(mentionFilter),
   );
 
-  const hasProjectLinks =
-    Boolean(project?.feedback_url) ||
-    Boolean(project?.agreements_url) ||
-    Boolean(project?.scope_of_work_url);
+  const portalViews = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "documents", label: "Documents", icon: FileText },
+    { id: "library", label: "Deliverables", icon: Library },
+  ];
+  const portalTitle =
+    portalViews.find((view) => view.id === activePortalView)?.label ||
+    customTabs.find((tab) => tab.id === activePortalView)?.name ||
+    "Dashboard";
+  const selectProjectTab = (tabId) => {
+    setActiveProjectTab(tabId);
+    setActivePortalView(tabId === "tracker" ? "dashboard" : tabId);
+  };
 
   return (
-    <div className="space-y-6" onClick={() => setLinkVersionMenu(null)}>
-      <div className="flex items-center gap-2">
-        <img src="/logo.svg" className="w-6" />
-        <span className="font-semibold text-sm tracking-tight hidden sm:inline">
-          Pixels Creative Technologies
-        </span>
-      </div>
+    <div className="min-h-screen bg-[#f6f6f4] text-[#30302e] antialiased md:flex">
+      <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-[#e8e8e4] bg-[#f3f3f0] text-[#6f6f6c] md:sticky md:top-0 md:flex">
+        <div className="flex h-12 items-center gap-2 border-b border-[#e8e8e4] px-3">
+          <img src="/logo.svg" alt="Pixels" className="h-6 w-6 shrink-0" />
+          <span className="truncate text-[13px] font-semibold text-[#343432]">Pixels</span>
+        </div>
+        <div className="flex items-center gap-2 border-b border-[#e8e8e4] px-3 py-3">
+          {project?.icon ? (
+            <img src={project.icon} alt="" className="h-8 w-8 shrink-0 rounded-md bg-white object-contain" />
+          ) : (
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#ddedea] text-xs font-bold text-[#0f7b6c]">
+              {project?.title?.charAt(0) || "C"}
+            </span>
+          )}
+          <span className="min-w-0">
+            <span className="block truncate text-xs font-semibold text-[#30302e]">{project?.title}</span>
+            <span className="block truncate text-[10px] text-[#8a8a86]">Client workspace</span>
+          </span>
+        </div>
+        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5 py-3">
+          {portalViews.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() =>
+                id === "dashboard" ? selectProjectTab("tracker") : setActivePortalView(id)
+              }
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition ${activePortalView === id ? "bg-[#e3e3df] font-medium text-[#30302e]" : "text-[#5f5f5b] hover:bg-[#eaeae6]"}`}
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0" />
+              {label}
+            </button>
+          ))}
+          {customTabs.length > 0 && (
+            <div className="pt-4">
+              <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[#999995]">Project tabs</p>
+              {customTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => selectProjectTab(tab.id)}
+                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition ${activePortalView === tab.id ? "bg-[#e3e3df] font-medium text-[#30302e]" : "text-[#5f5f5b] hover:bg-[#eaeae6]"}`}
+                >
+                  <Sparkles className="h-3.5 w-3.5 shrink-0 text-[#cb912f]" />
+                  <span className="truncate">{tab.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </nav>
+        <div className="border-t border-[#e8e8e4] p-2.5">
+          <button
+            type="button"
+            onClick={() => setIsRequestModalOpen(true)}
+            className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-[#20201e] px-3 text-xs font-medium text-white hover:bg-black"
+          >
+            <MessageSquare className="h-3.5 w-3.5" /> Raise a request
+          </button>
+        </div>
+      </aside>
+      <main className="min-w-0 flex-1 md:h-screen md:overflow-y-auto">
+        <header className="sticky top-0 z-30 flex h-12 items-center justify-between border-b border-[#e9e9e6] bg-[#f6f6f4]/95 px-4 backdrop-blur sm:px-6">
+          <div className="flex min-w-0 items-center gap-2 text-xs text-[#777772]">
+            <span className="shrink-0">Pixels</span>
+            <ChevronRight className="h-3 w-3 shrink-0 text-[#c4c4bf]" />
+            <span className="max-w-40 truncate">{project?.title}</span>
+            <ChevronRight className="h-3 w-3 shrink-0 text-[#c4c4bf]" />
+            <span className="truncate font-medium text-[#30302e]">{portalTitle}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsRequestModalOpen(true)}
+            className="ml-3 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[#e5e5e2] bg-white px-2.5 text-[11px] font-medium text-[#4c4c48] hover:bg-[#f7f7f5] md:hidden"
+          >
+            <MessageSquare className="h-3.5 w-3.5" /> Request
+          </button>
+        </header>
+        <div className="border-b border-[#e9e9e6] bg-[#f3f3f0] md:hidden">
+        <nav aria-label="Client sections" className="flex gap-1 overflow-x-auto px-3 py-2">
+          {portalViews.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() =>
+                id === "dashboard" ? selectProjectTab("tracker") : setActivePortalView(id)
+              }
+              className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] ${activePortalView === id ? "bg-[#e3e3df] font-medium text-[#30302e]" : "text-[#5f5f5b] hover:bg-[#eaeae6]"}`}
+            >
+              <Icon className="h-3.5 w-3.5" /> {label}
+            </button>
+          ))}
+        </nav>
+        {customTabs.length > 0 && (
+          <nav aria-label="Project tabs" className="border-t border-[#e9e9e6] px-3 py-2">
+            <p className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-[#999995]">Project tabs</p>
+            <div className="flex gap-1 overflow-x-auto">
+              {customTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => selectProjectTab(tab.id)}
+                  className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] ${activePortalView === tab.id ? "bg-[#e3e3df] font-medium text-[#30302e]" : "text-[#5f5f5b] hover:bg-[#eaeae6]"}`}
+                >
+                  <Sparkles className="h-3.5 w-3.5 text-[#cb912f]" /> {tab.name}
+                </button>
+              ))}
+            </div>
+          </nav>
+        )}
+        </div>
+        <div className="w-full px-4 pb-10 pt-4 sm:px-6 sm:pt-6">
+          <div className="space-y-6" onClick={() => setLinkVersionMenu(null)}>
       {/* Header & Overview with Raise a Request CTA */}
+      {activePortalView === "dashboard" && (
       <div className="bg-white border border-[#e9e9e7] rounded-2xl p-5 sm:p-8 shadow-sm">
         <div className="flex flex-row sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-2">
@@ -738,13 +893,6 @@ export default function ClientPortal({
             </span>
           </div>
 
-          <button
-            onClick={() => setIsRequestModalOpen(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold  transition active:scale-95 self-start sm:self-auto"
-          >
-            <MessageSquare className="h-4 w-4" />
-            <span>Raise a Request</span>
-          </button>
         </div>
 
         <div className="flex items-center gap-3 mt-3">
@@ -792,40 +940,11 @@ export default function ClientPortal({
           )}
         </div>
       </div>
+      )}
 
       {/* CLIENT PORTAL DYNAMIC TABS SWITCHER */}
-      <div className="flex items-center justify-between border-b border-[#e9e9e7] pt-1">
-        <div className="flex items-center gap-2 overflow-x-auto">
-          <button
-            onClick={() => setActiveProjectTab("tracker")}
-            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold transition-all relative shrink-0 ${
-              activeProjectTab === "tracker"
-                ? "text-[#37352f] after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-blue-600"
-                : "text-[#787774] hover:text-[#37352f]"
-            }`}
-          >
-            <Layers className="h-4 w-4 text-blue-600" />
-            <span>Overview &amp; Tracker</span>
-          </button>
-
-          {customTabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveProjectTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold transition-all relative shrink-0 ${
-                activeProjectTab === tab.id
-                  ? "text-[#37352f] after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-blue-600"
-                  : "text-[#787774] hover:text-[#37352f]"
-              }`}
-            >
-              <Sparkles className="h-3.5 w-3.5 text-[#cb912f]" />
-              <span>{tab.name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Project Health & Overall Completion Card */}
+      {isProjectTabView && (
       <div className="grid grid-cols-1 md:grid-cols-12 gap-6 bg-white border border-[#e9e9e7] rounded-2xl p-6 shadow-sm items-center">
         <div className="md:col-span-4 flex items-center justify-center">
           <div className="relative flex h-36 w-36 items-center justify-center">
@@ -864,7 +983,7 @@ export default function ClientPortal({
             {project?.status_note || "Delivery on track"}
           </span>
           <h2 className="text-sm font-semibold text-[#37352f]">
-            Delivery Progress &amp; Health Overview (
+            Milestone Progress (
             {activeProjectTab === "tracker"
               ? "Overview & Tracker"
               : customTabs.find((t) => t.id === activeProjectTab)?.name}
@@ -874,22 +993,22 @@ export default function ClientPortal({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <div className="bg-[#f7f6f3] border border-[#e9e9e7] rounded-lg p-3">
               <div className="text-lg font-bold text-[#37352f]">
-                {doneTasks}
+                {completedMilestones.length}
               </div>
-              <div className="text-[11px] text-[#787774]">Delivered</div>
+              <div className="text-[11px] text-[#787774]">Milestones completed</div>
             </div>
             <div className="bg-[#f7f6f3] border border-[#e9e9e7] rounded-lg p-3">
               <div className="text-lg font-bold text-[#37352f]">
-                {inProgressTasks}
+                {inProgressMilestones.length}
               </div>
-              <div className="text-[11px] text-[#787774]">In Progress</div>
+              <div className="text-[11px] text-[#787774]">Milestones in progress</div>
             </div>
             <div className="bg-[#f7f6f3] border border-[#e9e9e7] rounded-lg p-3">
               <div className="text-lg font-bold text-[#37352f]">
-                {tasks.length}
+                {milestones.length}
               </div>
               <div className="text-[11px] text-[#787774]">
-                Total Deliverables
+                Total milestones
               </div>
             </div>
             <div className="bg-[#f7f6f3] border border-[#e9e9e7] rounded-lg p-3">
@@ -901,9 +1020,18 @@ export default function ClientPortal({
           </div>
         </div>
       </div>
+      )}
 
       {/* Official Project Documents & Feedback Section */}
-      {hasProjectLinks && (
+      {activePortalView === "documents" && (
+        <ClientLibrary
+          project={project}
+          onRefresh={onRefresh}
+          uploaderRole="client"
+          mode="documents"
+        />
+      )}
+      {false && (
         <div className="space-y-2">
           <h3 className="text-xs font-bold uppercase tracking-wider text-[#787774]">
             Important Links
@@ -1073,6 +1201,7 @@ export default function ClientPortal({
 
       {/* Milestones Roadmap */}
       {/* Milestones Roadmap */}
+      {isProjectTabView && (
       <div className="space-y-2">
         <h3 className="text-xs font-bold uppercase tracking-wider text-[#787774]">
           Project Milestones ({milestones.length} Stages)
@@ -1084,8 +1213,9 @@ export default function ClientPortal({
             </div>
           ) : (
             milestones.map((m) => {
-              const isCompleted = m.status === "complete";
-              const progress = m.sheet_progress || 0; // Pulls from Google Sheets
+              const progress = Math.min(Number(m.sheet_progress) || 0, 100);
+              const isCompleted =
+                m.status === "complete" || m.status === "done" || progress >= 100;
 
               return (
                 <div
@@ -1096,25 +1226,26 @@ export default function ClientPortal({
                       : "bg-[#f9fafb] border-[#e9e9e7]"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] uppercase font-bold text-[#9b9a97]">
+                  <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+                    <span className="flex items-center gap-1 text-[10px] uppercase font-bold text-[#9b9a97]">
+                      {isCompleted && <Check className="h-3.5 w-3.5 text-[#0f7b6c]" />}
                       {m.due_date || "No Date"}
                     </span>
-                    {/* <span
-                      className={`h-4 w-4 rounded border flex items-center justify-center transition shrink-0 ${
-                        isCompleted
-                          ? "bg-[#0f7b6c] border-[#0f7b6c] text-white"
-                          : "border-[#d1d5db] bg-white"
-                      }`}
-                    >
-                      {isCompleted && <Check className="h-3 w-3 stroke-[3]" />}
-                    </span> */}
+                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${
+                      isCompleted
+                        ? "bg-[#ddedea] text-[#0f7b6c]"
+                        : progress > 0
+                          ? "bg-blue-50 text-blue-700"
+                          : "bg-[#f0f0ed] text-[#696965]"
+                    }`}>
+                      {isCompleted ? "Completed" : progress > 0 ? "In progress" : "Not started"}
+                    </span>
                   </div>
 
                   <div className="flex flex-col gap-3 mt-1">
                     <p
                       className={`text-xs font-bold leading-tight ${
-                        isCompleted ? "line-through opacity-75" : "text-[#37352f]"
+                        isCompleted ? "opacity-75" : "text-[#37352f]"
                       }`}
                     >
                       {m.title}
@@ -1123,7 +1254,7 @@ export default function ClientPortal({
                     <div className="space-y-1.5 w-full">
                       <div className="flex items-center justify-between text-[10px]">
                         <span className="font-semibold text-gray-700">
-                          {progress}% Complete
+                          {isCompleted ? 100 : progress}% Complete
                         </span>
                         {m.sheet_url && (
                           <a
@@ -1139,7 +1270,7 @@ export default function ClientPortal({
                       <div className="h-1.5 w-full bg-gray-200/80 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-green-500 rounded-full transition-all duration-500"
-                          style={{ width: `${progress}%` }}
+                          style={{ width: `${isCompleted ? 100 : progress}%` }}
                         />
                       </div>
                     </div>
@@ -1150,15 +1281,28 @@ export default function ClientPortal({
           )}
         </div>
       </div>
+      )}
+
+      
+
+      {activePortalView === "library" && (
+        <ClientLibrary
+          project={project}
+          onRefresh={onRefresh}
+          uploaderRole="client"
+          mode="deliverables"
+        />
+      )}
 
       {/* --- FILE TREE DIRECTORY EXPLORER FOR DELIVERABLES --- */}
+      {activePortalView === "legacy-library" && (
       <div className="bg-white border border-[#e5e7eb] rounded-2xl p-5 sm:p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#f3f4f6] pb-3">
           <div className="flex items-center gap-2">
             <FolderOpen className="h-4 w-4 text-blue-600" />
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#374151]">
               Deliverables File &amp; Links Explorer (
-              {currentTabDeliverables.length} items)
+              {libraryDeliverables.length} items)
             </h3>
           </div>
           <div className="flex items-center gap-2">
@@ -1239,8 +1383,8 @@ export default function ClientPortal({
                       ? ` • ${format(parseISO(item.created_at), "MMM dd, yyyy")}`
                       : ""}
                   </span>
-                  {item.uploaded_by === "client" && (
-                    <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                  {activePortalView === "library" && (
+                    <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() =>
@@ -1274,7 +1418,7 @@ export default function ClientPortal({
             const children = projectFolders.filter(
               (f) => f.parent_id === folder.id,
             );
-            const assets = currentTabDeliverables.filter(
+            const assets = libraryDeliverables.filter(
               (item) => item.folder_id === folder.id,
             );
 
@@ -1307,7 +1451,7 @@ export default function ClientPortal({
                     </span>
                   </button>
 
-                  <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0">
                     <button
                       type="button"
                       onClick={() => handleOpenAddDeliverableModal(folder.id)}
@@ -1323,6 +1467,22 @@ export default function ClientPortal({
                       title="New subfolder"
                     >
                       <FolderPlus className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRenameFolder(folder)}
+                      className="p-1 text-gray-500 hover:bg-white rounded"
+                      title="Rename folder"
+                    >
+                      <Edit2 className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteFolder(folder)}
+                      className="p-1 text-gray-500 hover:bg-rose-50 hover:text-rose-600 rounded"
+                      title="Delete empty folder"
+                    >
+                      <Trash2 className="h-3 w-3" />
                     </button>
                   </div>
                 </div>
@@ -1348,7 +1508,7 @@ export default function ClientPortal({
           const rootFolders = projectFolders.filter(
             (folder) => !folder.parent_id || folder.parent_id === "root",
           );
-          const unfiled = currentTabDeliverables.filter(
+          const unfiled = libraryDeliverables.filter(
             (item) => !item.folder_id,
           );
 
@@ -1411,6 +1571,7 @@ export default function ClientPortal({
           );
         })()}
       </div>
+      )}
 
       {/* --- CUSTOM CREATE FOLDER MODAL --- */}
       {isCreateFolderModalOpen && (
@@ -1619,7 +1780,7 @@ export default function ClientPortal({
       {/* RAISE A REQUEST MODAL */}
       {isRequestModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="w-full max-w-xl bg-white border border-[#e9e9e7] rounded-3xl shadow-2xl p-6 sm:p-7 max-h-[92dvh] flex flex-col my-auto relative">
+          <div className="w-full max-w-xl bg-white border border-[#e9e9e7] rounded-3xl shadow-2xl p-4 sm:p-7 max-h-[92dvh] flex flex-col my-auto relative">
             <div className="flex items-center justify-between pb-3 border-b border-[#e9e9e7]">
               <div>
                 <h3 className="text-base font-bold text-[#111827]">
@@ -1753,8 +1914,8 @@ export default function ClientPortal({
                 </div>
               )}
 
-              <div className="flex items-center justify-between pt-3 border-t border-[#e9e9e7]">
-                <div className="flex items-center gap-1">
+              <div className="flex flex-col gap-2 pt-3 border-t border-[#e9e9e7] sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap items-center gap-1">
                   <label
                     title="Attach Image"
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[#e5e7eb] hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 text-[#6b7280] font-semibold text-xs cursor-pointer transition shadow-2xs"
@@ -1784,7 +1945,7 @@ export default function ClientPortal({
                   </label>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <button
                     type="button"
                     onClick={() => setIsRequestModalOpen(false)}
@@ -1941,6 +2102,9 @@ export default function ClientPortal({
           </button>
         </div>
       )}
+          </div>
+        </div>
+      </main>
     </div>
   );
 }

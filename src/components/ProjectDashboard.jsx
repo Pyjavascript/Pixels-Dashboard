@@ -15,7 +15,6 @@ import {
   Save,
   X,
   Settings2,
-  CalendarRange,
   Kanban as KanbanIcon,
   Table as TableIcon,
   ChevronLeft,
@@ -26,6 +25,7 @@ import {
   Trash2,
   Bell,
   Check,
+  Copy,
   Image as ImageIcon,
   Video as VideoIcon,
   Paperclip,
@@ -66,6 +66,7 @@ import {
 } from "date-fns";
 import { DayPicker } from "react-day-picker";
 import "react-day-picker/dist/style.css";
+import StageSetupModal from "./StageSetupModal";
 
 const MONTHS = [
   "January",
@@ -219,13 +220,470 @@ function getStatusBadgeClass(status) {
   }
 }
 
+function GoogleSheetsIcon({ className = "h-4 w-4" }) {
+  return (
+    <svg viewBox="0 0 48 48" className={`shrink-0 ${className}`} aria-hidden="true">
+      <path
+        fill="#0f9d58"
+        d="M12 4h17l11 11v27a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"
+      />
+      <path fill="#87ceac" d="M29 4v9a2 2 0 0 0 2 2h9z" />
+      <rect x="16" y="22" width="16" height="14" rx="1" fill="#fff" />
+      <path
+        d="M16 26.7h16M16 31.3h16M23 22v14"
+        stroke="#0f9d58"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+// "" = empty, null = invalid, string = normalized https link
+function normalizeSheetUrl(raw) {
+  const v = (raw || "").trim();
+  if (!v) return "";
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^www\./i.test(v)) return `https://${v}`;
+  return null;
+}
+
+function SubStagePanel({ stage, onChange }) {
+  const [title, setTitle] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [sheetUrl, setSheetUrl] = useState("");
+  const [urlError, setUrlError] = useState(false);
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [sheetEditIndex, setSheetEditIndex] = useState(null);
+  const [sheetEditValue, setSheetEditValue] = useState("");
+  const [sheetEditError, setSheetEditError] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const list = Array.isArray(stage.subtasks) ? stage.subtasks : [];
+  const isDone = (s) =>
+    s.status === "complete" || s.status === "done" || Number(s.progress) >= 100;
+  const doneCount = list.filter(isDone).length;
+  const pct = list.length ? Math.round((doneCount / list.length) * 100) : 0;
+
+  const commit = async (next) => {
+    setBusy(true);
+    const ok = await onChange(next);
+    setBusy(false);
+    return ok;
+  };
+
+  const handleAdd = async () => {
+    const t = title.trim();
+    if (!t || busy) return;
+    const url = normalizeSheetUrl(sheetUrl);
+    if (url === null) {
+      setUrlError(true);
+      return;
+    }
+    const id =
+      globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const ok = await commit([
+      ...list,
+      {
+        id,
+        title: t,
+        due_date: dueDate || null,
+        sheet_url: url || null,
+        status: "pending",
+        progress: 0,
+      },
+    ]);
+    if (ok) {
+      setTitle("");
+      setDueDate("");
+      setSheetUrl("");
+      setUrlError(false);
+    }
+  };
+
+  const handleToggle = (index) =>
+    commit(
+      list.map((s, i) =>
+        i !== index
+          ? s
+          : isDone(s)
+            ? { ...s, status: "pending", progress: 0 }
+            : { ...s, status: "complete", progress: 100 },
+      ),
+    );
+
+  const handleRename = async (index) => {
+    const t = editTitle.trim();
+    setEditingIndex(null);
+    const current = list[index]?.title || list[index]?.name || "";
+    if (!t || t === current) return;
+    await commit(list.map((s, i) => (i === index ? { ...s, title: t } : s)));
+  };
+
+  const handleSaveSheet = async (index, clear = false) => {
+    const url = clear ? "" : normalizeSheetUrl(sheetEditValue);
+    if (url === null) {
+      setSheetEditError(true);
+      return;
+    }
+    const ok = await commit(
+      list.map((s, i) => (i === index ? { ...s, sheet_url: url || null } : s)),
+    );
+    if (ok) setSheetEditIndex(null);
+  };
+
+  const handleRemove = (index) => commit(list.filter((_, i) => i !== index));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-[#30302e]">Sub-stages</h3>
+        <span className="text-[10px] text-[#8a8a86]">
+          {doneCount}/{list.length} done
+        </span>
+      </div>
+
+      {list.length > 0 && (
+        <div className="h-1 w-full overflow-hidden rounded-full bg-[#e9e9e7]">
+          <div
+            className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+
+      <div
+        className={`divide-y divide-[#efefec] rounded-lg border border-[#e5e5e2] bg-white ${busy ? "opacity-70" : ""}`}
+      >
+        {list.length === 0 && (
+          <p className="px-3 py-5 text-center text-xs text-[#8a8a86]">
+            No sub-stages yet. Add the first one below.
+          </p>
+        )}
+
+        {list.map((s, index) => {
+          const done = isDone(s);
+          const name = s.title || s.name || `Sub-stage ${index + 1}`;
+          return (
+            <div key={s.id || index} className="group px-3 py-2.5">
+              <div className="flex items-start gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleToggle(index)}
+                  disabled={busy}
+                  aria-label={
+                    done ? "Reopen sub-stage" : "Mark sub-stage complete"
+                  }
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
+                    done
+                      ? "border-emerald-600 bg-emerald-600 text-white"
+                      : "border-gray-300 bg-white text-transparent hover:border-emerald-600"
+                  }`}
+                >
+                  <Check className="h-3 w-3 stroke-[3]" />
+                </button>
+
+                <div className="min-w-0 flex-1">
+                  {editingIndex === index ? (
+                    <input
+                      autoFocus
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      onBlur={() => handleRename(index)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") setEditingIndex(null);
+                      }}
+                      className="h-6 w-full rounded border border-blue-500 bg-white px-1.5 text-xs font-medium text-[#333330] outline-none"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingIndex(index);
+                        setEditTitle(name);
+                      }}
+                      title="Click to rename"
+                      className={`block w-full truncate text-left text-xs font-medium hover:text-blue-700 ${
+                        done ? "text-[#9a9a96] line-through" : "text-[#333330]"
+                      }`}
+                    >
+                      {name}
+                    </button>
+                  )}
+                  {(s.notes || s.description) && (
+                    <p className="mt-0.5 text-[10px] text-[#787774]">
+                      {s.notes || s.description}
+                    </p>
+                  )}
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                    {(s.due_date || s.date) && (
+                      <span className="text-[10px] text-[#9a9a96]">
+                        Due {s.due_date || s.date}
+                      </span>
+                    )}
+                    {s.sheet_url && (
+                      <a
+                        href={s.sheet_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700 hover:underline"
+                      >
+                        <GoogleSheetsIcon className="h-3 w-3" />
+                        Open sheet
+                        <ArrowUpRight className="h-2.5 w-2.5" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSheetEditIndex(sheetEditIndex === index ? null : index);
+                      setSheetEditValue(s.sheet_url || "");
+                      setSheetEditError(false);
+                    }}
+                    title={s.sheet_url ? "Edit sheet link" : "Link a Google Sheet"}
+                    aria-label={
+                      s.sheet_url ? "Edit sheet link" : "Link a Google Sheet"
+                    }
+                    className="rounded p-1 hover:bg-[#f4f4f1]"
+                  >
+                    <GoogleSheetsIcon
+                      className={`h-3.5 w-3.5 ${s.sheet_url ? "" : "opacity-40 grayscale"}`}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(index)}
+                    disabled={busy}
+                    aria-label="Delete sub-stage"
+                    className="rounded p-1 text-[#9ca3af] transition hover:text-rose-600 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+
+              {sheetEditIndex === index && (
+                <div className="ml-6 mt-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      autoFocus
+                      value={sheetEditValue}
+                      onChange={(e) => {
+                        setSheetEditValue(e.target.value);
+                        setSheetEditError(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleSaveSheet(index);
+                        }
+                        if (e.key === "Escape") setSheetEditIndex(null);
+                      }}
+                      placeholder="https://docs.google.com/spreadsheets/…"
+                      className={`h-7 min-w-0 flex-1 rounded border bg-white px-2 text-[11px] outline-none ${
+                        sheetEditError
+                          ? "border-rose-400"
+                          : "border-[#e5e5e2] focus:border-blue-500"
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveSheet(index)}
+                      disabled={busy}
+                      className="h-7 shrink-0 rounded-md bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:opacity-40"
+                    >
+                      Save
+                    </button>
+                    {s.sheet_url && (
+                      <button
+                        type="button"
+                        onClick={() => handleSaveSheet(index, true)}
+                        disabled={busy}
+                        className="h-7 shrink-0 rounded-md border border-[#e5e5e2] px-2 text-[11px] font-medium text-[#5f5f5b] hover:bg-[#f7f7f5]"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  {sheetEditError && (
+                    <p className="mt-1 text-[10px] text-rose-600">
+                      Enter a full link starting with https://
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Add row */}
+        <div className="space-y-2 bg-[#fafafa] px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Plus className="h-3.5 w-3.5 shrink-0 text-[#9a9a96]" />
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleAdd();
+                }
+              }}
+              placeholder="Add a sub-stage…"
+              className="h-7 min-w-0 flex-1 bg-transparent text-xs text-[#333330] outline-none placeholder:text-[#9a9a96]"
+            />
+            <input
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              aria-label="Sub-stage due date"
+              className="h-7 w-[112px] shrink-0 rounded border border-[#e5e5e2] bg-white px-1.5 text-[10px] text-[#5f5f5b]"
+            />
+            <button
+              type="button"
+              onClick={handleAdd}
+              disabled={!title.trim() || busy}
+              className="h-7 shrink-0 rounded-md bg-blue-600 px-2.5 text-[11px] font-semibold text-white transition hover:bg-blue-700 disabled:opacity-40"
+            >
+              Add
+            </button>
+          </div>
+
+          {title.trim() && (
+            <div className="pl-[22px]">
+              <div className="flex items-center gap-2">
+                <GoogleSheetsIcon className="h-4 w-4" />
+                <input
+                  value={sheetUrl}
+                  onChange={(e) => {
+                    setSheetUrl(e.target.value);
+                    setUrlError(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAdd();
+                    }
+                  }}
+                  placeholder="Link a Google Sheet (optional)"
+                  className={`h-7 min-w-0 flex-1 rounded border bg-white px-2 text-[11px] outline-none ${
+                    urlError
+                      ? "border-rose-400"
+                      : "border-[#e5e5e2] focus:border-blue-500"
+                  }`}
+                />
+              </div>
+              {urlError && (
+                <p className="mt-1 pl-6 text-[10px] text-rose-600">
+                  Enter a full link starting with https://
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SheetsList({ stage }) {
+  const subs = Array.isArray(stage.subtasks) ? stage.subtasks : [];
+  const rows = [
+    ...(stage.sheet_url
+      ? [
+          {
+            key: "stage",
+            name: stage.title,
+            kind: "Stage sheet",
+            url: stage.sheet_url,
+          },
+        ]
+      : []),
+    ...subs
+      .map((s, i) => ({
+        key: s.id || `sub-${i}`,
+        name: s.title || s.name || `Sub-stage ${i + 1}`,
+        kind: "Sub-stage sheet",
+        url: s.sheet_url,
+      }))
+      .filter((r) => r.url),
+  ];
+
+  return (
+    <div className="flex min-h-72 flex-col overflow-hidden rounded-lg border border-[#e5e5e2] bg-white">
+      <div className="flex items-center justify-between gap-2 border-b border-[#efefec] px-3 py-2">
+        <h3 className="text-xs font-semibold text-[#30302e]">Google Sheets</h3>
+        <span className="text-[10px] text-[#8a8a86]">
+          {rows.length} linked
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-5 py-12 text-center text-xs text-[#8a8a86]">
+          <GoogleSheetsIcon className="h-7 w-7 opacity-40 grayscale" />
+          <p>
+            No sheets linked yet. Link one to this stage or to any sub-stage.
+          </p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-[#efefec] overflow-y-auto">
+          {rows.map((r) => (
+            <li key={r.key} className="flex items-center gap-3 px-3 py-2.5">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#e8f5ee]">
+                <GoogleSheetsIcon className="h-5 w-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-[#333330]">
+                  {r.name}
+                </p>
+                <p className="truncate text-[10px] text-[#9a9a96]">
+                  {r.kind} · {r.url.replace(/^https?:\/\//, "")}
+                </p>
+              </div>
+              <a
+                href={r.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[#e5e5e1] bg-white px-2.5 text-xs font-medium text-[#5f5f5b] hover:bg-[#f4f4f1]"
+              >
+                Open <ArrowUpRight className="h-3 w-3" />
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ProjectDashboard({
   project,
   employees = [],
   daysRemaining,
   onRefresh,
+  activeView,
+  onViewChange,
+  showImportantLinks = true,
 }) {
-  const [activeProjectTab, setActiveProjectTab] = useState("tracker");
+  const [internalProjectTab, setInternalProjectTab] = useState("tracker");
+  const activeProjectTab =
+    activeView == null
+      ? internalProjectTab
+      : activeView === "dashboard"
+        ? "tracker"
+        : activeView === "tracker" ||
+            (project?.custom_tabs || []).some((tab) => tab.id === activeView)
+          ? activeView
+          : "tracker";
+  const setActiveProjectTab = (tabId) => {
+    setInternalProjectTab(tabId);
+    onViewChange?.(tabId === "tracker" ? "dashboard" : tabId);
+  };
   const [isAddTabModalOpen, setIsAddTabModalOpen] = useState(false);
   const [newTabName, setNewTabName] = useState("");
   const [isSavingTab, setIsSavingTab] = useState(false);
@@ -248,14 +706,18 @@ export default function ProjectDashboard({
   const [isAddDeliverableModalOpen, setIsAddDeliverableModalOpen] =
     useState(false);
   const [isEditProjectOpen, setIsEditProjectOpen] = useState(false);
+  // const [isStageModalOpen, setIsStageModalOpen] = useState(false);
+  // const [isStageCalendarOpen, setIsStageCalendarOpen] = useState(false);
+
   const [isStageModalOpen, setIsStageModalOpen] = useState(false);
-  const [isStageCalendarOpen, setIsStageCalendarOpen] = useState(false);
+  const [editingStage, setEditingStage] = useState(null);
 
   // Stage Form State
-  const [editingStage, setEditingStage] = useState(null);
-  const [stageTitle, setStageTitle] = useState("");
-  const [stageDueDate, setStageDueDate] = useState("");
-  const [isSavingStage, setIsSavingStage] = useState(false);
+  // const [editingStage, setEditingStage] = useState(null);
+  // const [stageTitle, setStageTitle] = useState("");
+  // const [stageDueDate, setStageDueDate] = useState("");
+  // const [isSavingStage, setIsSavingStage] = useState(false);
+  // const [stageCompleted, setStageCompleted] = useState(false);
 
   // Timeline Navigation State & Horizontal Scroll Ref
   const [timelineBaseDate, setTimelineBaseDate] = useState(new Date());
@@ -268,6 +730,8 @@ export default function ProjectDashboard({
   const [delivType, setDelivType] = useState("link");
   const [uploadingFile, setUploadingFile] = useState(false);
   const [fileObject, setFileObject] = useState(null);
+
+  const [selectedMilestoneModal, setSelectedMilestoneModal] = useState(null);
 
   const [openPriorityMenuId, setOpenPriorityMenuId] = useState(null);
   const [openStatusMenuId, setOpenStatusMenuId] = useState(null);
@@ -288,6 +752,16 @@ export default function ProjectDashboard({
   // NEW: State for Edit Project Modal to match AllProjectsTab layout
   const [removeIcon, setRemoveIcon] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState(project?.team_members || []);
+
+  useEffect(() => {
+    if (!selectedMilestoneModal?.id) return;
+    const latestMilestone = (project?.milestones || []).find(
+      (milestone) => String(milestone.id) === String(selectedMilestoneModal.id),
+    );
+    if (latestMilestone && latestMilestone !== selectedMilestoneModal) {
+      setSelectedMilestoneModal(latestMilestone);
+    }
+  }, [project?.milestones, selectedMilestoneModal?.id]);
 
   const toggleFolder = (folderKey) => {
     setExpandedFolders((prev) => ({ ...prev, [folderKey]: !prev[folderKey] }));
@@ -600,10 +1074,10 @@ export default function ProjectDashboard({
       const totalTasks = tasks.length || 1;
       return Math.round((doneTasks / totalTasks) * 100);
     }
-    
-    const totalProgress = milestones.reduce((acc, m) => {
 
-      const progress = m.status === "complete" ? 100 : (Number(m.sheet_progress) || 0);
+    const totalProgress = milestones.reduce((acc, m) => {
+      const progress =
+        m.status === "complete" ? 100 : Number(m.sheet_progress) || 0;
       return acc + progress;
     }, 0);
 
@@ -652,53 +1126,68 @@ export default function ProjectDashboard({
     // Use a unique channel for this specific client portal
     const channel = supabase
       .channel(`client-portal-${project.id}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public" },
-        (payload) => {
-          console.log("🔥 ANY DATABASE CHANGE FIRED:", payload);
-          const currentState = stateRef.current;
+      .on("postgres_changes", { event: "*", schema: "public" }, (payload) => {
+        console.log("🔥 ANY DATABASE CHANGE FIRED:", payload);
+        const currentState = stateRef.current;
 
-          // 1. Handle Client Requests (Instant Push)
-          if (payload.table === "client_requests" && payload.eventType === "INSERT") {
-            if (String(payload.new.project_id) === String(project.id)) {
-              setRequestsList((prev) => [payload.new, ...prev]);
-            }
+        // 1. Handle Client Requests (Instant Push)
+        if (
+          payload.table === "client_requests" &&
+          payload.eventType === "INSERT"
+        ) {
+          if (String(payload.new.project_id) === String(project.id)) {
+            setRequestsList((prev) => [payload.new, ...prev]);
           }
+        }
 
-          // 2. Handle Dashboard Updates (Popup Trigger)
-          const trackedTables = ["tasks", "milestones", "deliverables", "projects", "project_folders"];
-          
-          if (trackedTables.includes(payload.table)) {
-            let isCurrentProject = false;
+        // 2. Handle Dashboard Updates (Popup Trigger)
+        const trackedTables = [
+          "tasks",
+          "milestones",
+          "deliverables",
+          "projects",
+          "project_folders",
+        ];
 
-            // A. Check if project_id is explicitly in the payload
-            if (String(payload.new?.project_id) === String(project.id) || String(payload.old?.project_id) === String(project.id)) {
+        if (trackedTables.includes(payload.table)) {
+          let isCurrentProject = false;
+
+          // A. Check if project_id is explicitly in the payload
+          if (
+            String(payload.new?.project_id) === String(project.id) ||
+            String(payload.old?.project_id) === String(project.id)
+          ) {
+            isCurrentProject = true;
+          } else if (payload.eventType === "DELETE" && payload.old?.id) {
+            const delId = String(payload.old.id);
+
+            const inTasks = currentState.project?.tasks?.some(
+              (t) => String(t.id) === delId,
+            );
+            const inMilestones = currentState.project?.milestones?.some(
+              (m) => String(m.id) === delId,
+            );
+            const inDeliverables = currentState.project?.deliverables?.some(
+              (d) => String(d.id) === delId,
+            );
+            const inFolders = currentState.projectFolders?.some(
+              (f) => String(f.id) === delId,
+            );
+
+            if (inTasks || inMilestones || inDeliverables || inFolders) {
               isCurrentProject = true;
-            } 
-            else if (payload.eventType === "DELETE" && payload.old?.id) {
-              const delId = String(payload.old.id);
-              
-              const inTasks = currentState.project?.tasks?.some(t => String(t.id) === delId);
-              const inMilestones = currentState.project?.milestones?.some(m => String(m.id) === delId);
-              const inDeliverables = currentState.project?.deliverables?.some(d => String(d.id) === delId);
-              const inFolders = currentState.projectFolders?.some(f => String(f.id) === delId);
-              
-              if (inTasks || inMilestones || inDeliverables || inFolders) {
-                isCurrentProject = true;
-              }
-            }
-
-            // If the change belongs to us, trigger the UI updates
-            if (isCurrentProject) {
-              if (payload.table === "project_folders") {
-                fetchProjectFolders(); // Silently update folders
-              }
-              setUpdateAvailable(true); // Show the popup
             }
           }
-        },
-      )
+
+          // If the change belongs to us, trigger the UI updates
+          if (isCurrentProject) {
+            if (payload.table === "project_folders") {
+              fetchProjectFolders(); // Silently update folders
+            }
+            setUpdateAvailable(true); // Show the popup
+          }
+        }
+      })
       .subscribe((status) => {
         console.log("Supabase Realtime Status:", status);
       });
@@ -707,7 +1196,6 @@ export default function ProjectDashboard({
       supabase.removeChannel(channel);
     };
   }, [project?.id]);
-
 
   const unreadCount = requestsList.filter((r) => !r.is_read).length;
 
@@ -815,65 +1303,170 @@ export default function ProjectDashboard({
 
   const [stageSheetUrl, setStageSheetUrl] = useState("");
 
+  // const handleOpenStageModal = (stage = null) => {
+  //   if (stage) {
+  //     setEditingStage(stage);
+  //     setStageTitle(stage.title);
+  //     setStageDueDate(stage.due_date || "");
+  //     setStageSheetUrl(stage.sheet_url || "");
+  //     setStageCompleted(
+  //       stage.status === "complete" || Number(stage.sheet_progress) >= 100,
+  //     );
+  //   } else {
+  //     setEditingStage(null);
+  //     setStageTitle("");
+  //     setStageDueDate(new Date());
+  //     setStageSheetUrl("");
+  //     setStageCompleted(false);
+  //   }
+  //   setIsStageModalOpen(true);
+  // };
+
   const handleOpenStageModal = (stage = null) => {
-    if (stage) {
-      setEditingStage(stage);
-      setStageTitle(stage.title);
-      setStageDueDate(stage.due_date || "");
-      setStageSheetUrl(stage.sheet_url || "");
-    } else {
-      setEditingStage(null);
-      setStageTitle("");
-      setStageDueDate(new Date());
-      setStageSheetUrl("");
-    }
+    setEditingStage(stage);
     setIsStageModalOpen(true);
   };
 
-  const handleSaveStage = async (e) => {
-    e.preventDefault();
-    if (!stageTitle.trim()) return;
+  // const handleSaveStage = async (e) => {
+  //   if (!stageTitle.trim()) return;
 
-    setIsSavingStage(true);
-    const formattedDueDate =
-      stageDueDate instanceof Date
-        ? format(stageDueDate, "yyyy-MM-dd")
-        : stageDueDate.trim() || "TBD";
+  //   setIsSavingStage(true);
+  //   const formattedDueDate =
+  //     stageDueDate instanceof Date
+  //       ? format(stageDueDate, "yyyy-MM-dd")
+  //       : stageDueDate.trim() || "TBD";
+  //   let createdStage = null;
+
+  //   if (editingStage) {
+  //     const { error } = await supabase
+  //       .from("milestones")
+  //       .update({
+  //         title: stageTitle.trim(),
+  //         due_date: formattedDueDate,
+  //         sheet_url: stageSheetUrl,
+  //         status: stageCompleted ? "complete" : "pending",
+  //         sheet_progress: stageCompleted
+  //           ? 100
+  //           : Math.min(Number(editingStage.sheet_progress) || 0, 99),
+  //       })
+  //       .eq("id", editingStage.id);
+
+  //     if (error) {
+  //       alert("Error updating stage: " + error.message);
+  //       setIsSavingStage(false);
+  //       return;
+  //     }
+  //   } else {
+  //     const { data, error } = await supabase
+  //       .from("milestones")
+  //       .insert({
+  //         project_id: project?.id,
+  //         tab_id: activeProjectTab,
+  //         title: stageTitle.trim(),
+  //         due_date: formattedDueDate,
+  //         sheet_url: stageSheetUrl,
+  //         sheet_progress: stageCompleted ? 100 : 0,
+  //         status: stageCompleted ? "complete" : "pending",
+  //         order_index: milestones.length + 1,
+  //       })
+  //       .select()
+  //       .single();
+
+  //     if (error) {
+  //       alert("Error adding stage: " + error.message);
+  //       setIsSavingStage(false);
+  //       return;
+  //     }
+  //     createdStage = data;
+  //   }
+
+  //   setIsSavingStage(false);
+  //   setIsStageModalOpen(false);
+  //   setEditingStage(null);
+  //   if (createdStage) {
+  //     setSelectedMilestoneModal({
+  //       ...createdStage,
+  //       subtasks: Array.isArray(createdStage.subtasks)
+  //         ? createdStage.subtasks
+  //         : [],
+  //     });
+  //   }
+  //   setStageTitle("");
+  //   setStageDueDate("");
+  //   onRefresh?.();
+  // };
+
+  const handleSaveStage = async (stageData, opts = {}) => {
+    let saved = editingStage;
 
     if (editingStage) {
+      // Update existing stage
       const { error } = await supabase
         .from("milestones")
         .update({
-          title: stageTitle.trim(),
-          due_date: formattedDueDate,
-          sheet_url: stageSheetUrl,
+          title: stageData.title,
+          due_date: stageData.due_date,
+          sheet_url: stageData.sheet_url,
+          status: stageData.status,
+          sheet_progress: stageData.sheet_progress,
         })
         .eq("id", editingStage.id);
 
-      if (error) alert("Error updating stage: " + error.message);
+      if (error) {
+        alert("Error updating stage: " + error.message);
+        return null;
+      }
     } else {
-      const { error } = await supabase.from("milestones").insert({
-        project_id: project?.id,
-        tab_id: activeProjectTab,
-        title: stageTitle.trim(),
-        due_date: formattedDueDate,
-        sheet_url: stageSheetUrl,
-        sheet_progress: 0,
-        status: "pending",
-        order_index: milestones.length + 1,
-      });
+      // Create new stage
+      const { data, error } = await supabase
+        .from("milestones")
+        .insert({
+          project_id: project?.id,
+          tab_id: activeProjectTab,
+          title: stageData.title,
+          due_date: stageData.due_date,
+          sheet_url: stageData.sheet_url,
+          status: stageData.status,
+          sheet_progress: stageData.sheet_progress,
+          order_index: milestones.length + 1,
+        })
+        .select()
+        .single();
 
-      if (error) alert("Error adding stage: " + error.message);
+      if (error) {
+        alert("Error creating stage: " + error.message);
+        return null;
+      }
+      saved = data;
     }
 
-    setIsSavingStage(false);
+    if (opts.keepOpen) {
+      // Modal stays open; later saves update this row instead of inserting again
+      setEditingStage(saved);
+      onRefresh?.();
+      return saved;
+    }
+
     setIsStageModalOpen(false);
     setEditingStage(null);
-    setStageTitle("");
-    setStageDueDate("");
     onRefresh?.();
+    return saved;
   };
-
+  const handleSaveSubstages = async (stageId, subtasks) => {
+    const { error } = await supabase
+      .from("milestones")
+      .update({ subtasks })
+      .eq("id", stageId);
+    if (error) {
+      alert("Error saving sub-stages: " + error.message);
+      return false;
+    }
+    setSelectedMilestoneModal((prev) =>
+      prev && String(prev.id) === String(stageId) ? { ...prev, subtasks } : prev,
+    );
+    onRefresh?.();
+    return true;
+  };
   const handleDeleteStage = async (stageId) => {
     if (!confirm("Are you sure you want to delete this stage?")) return;
     await supabase.from("milestones").delete().eq("id", stageId);
@@ -881,13 +1474,31 @@ export default function ProjectDashboard({
   };
 
   const handleToggleMilestone = async (milestone) => {
-    const isComplete = milestone.status === "complete";
+    const isComplete =
+      milestone.status === "complete" ||
+      Number(milestone.sheet_progress) >= 100;
     const newStatus = isComplete ? "pending" : "complete";
 
-    await supabase
+    let updatePayload = { status: newStatus };
+
+    if (!isComplete) {
+      // Marking as complete: Backup current progress before forcing to 100%
+      updatePayload.original_progress = milestone.sheet_progress || 0;
+      updatePayload.sheet_progress = 100;
+    } else {
+      // Unchecking: Restore back to what Excel/original progress was
+      updatePayload.sheet_progress = milestone.original_progress || 0;
+    }
+
+    const { error } = await supabase
       .from("milestones")
-      .update({ status: newStatus })
+      .update(updatePayload)
       .eq("id", milestone.id);
+
+    if (error) {
+      alert("Error updating stage: " + error.message);
+      return;
+    }
 
     onRefresh?.();
   };
@@ -1016,6 +1627,7 @@ export default function ProjectDashboard({
       project_id: project?.id,
       tab_id: activeProjectTab,
       name: taskName.trim(),
+      created_at: new Date().toISOString(),
       status: taskStatus,
       assignee_id: taskAssignee || null,
       start_date: taskDateRange?.from
@@ -1293,7 +1905,7 @@ export default function ProjectDashboard({
       }}
     >
       {/* Top Header with Notification Bell */}
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 py-10">
         <div>
           <div className="flex items-center gap-3 text-2xl font-bold tracking-tight text-[#37352f]">
             {project?.icon && (
@@ -1473,175 +2085,176 @@ export default function ProjectDashboard({
       </div>
 
       {/* Important Links */}
-      {(project?.feedback_url ||
-        project?.agreements_url ||
-        project?.scope_of_work_url) && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-[#787774]">
-            Important Links
-          </h3>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {[
-              {
-                key: "feedback_url",
-                url: project?.feedback_url,
-                version: project?.feedback_url_version || 1,
-                title: "Feedback Document",
-                sub: "Submit notes & revisions",
-                icon: <MessageSquare className="h-4 w-4" />,
-                highlighted: true,
-              },
-              {
-                key: "agreements_url",
-                url: project?.agreements_url,
-                version: project?.agreements_url_version || 1,
-                title: "Master Agreement",
-                sub: "Signed legal terms",
-                icon: <FileSignature className="h-4 w-4" />,
-                highlighted: false,
-                iconWrap:
-                  "bg-purple-50 text-purple-600 border border-purple-100",
-              },
-              {
-                key: "scope_of_work_url",
-                url: project?.scope_of_work_url,
-                version: project?.scope_of_work_url_version || 1,
-                title: "Scope of Work (SOW)",
-                sub: "Project deliverables spec",
-                icon: <FileCheck2 className="h-4 w-4" />,
-                highlighted: false,
-                iconWrap: "bg-blue-50 text-blue-600 border border-blue-100",
-              },
-            ].map((link) => {
-              if (!link.url) return null;
-              const isMenuOpen = linkVersionMenu === link.key;
-              const displayUrl = getDisplayedLinkUrl(link);
-              const displayVersion =
-                selectedLinkVersions[link.key] || link.version;
+      {showImportantLinks &&
+        (project?.feedback_url ||
+          project?.agreements_url ||
+          project?.scope_of_work_url) && (
+          <div className="space-y-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-[#787774]">
+              Important Links
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {[
+                {
+                  key: "feedback_url",
+                  url: project?.feedback_url,
+                  version: project?.feedback_url_version || 1,
+                  title: "Feedback Document",
+                  sub: "Submit notes & revisions",
+                  icon: <MessageSquare className="h-4 w-4" />,
+                  highlighted: true,
+                },
+                {
+                  key: "agreements_url",
+                  url: project?.agreements_url,
+                  version: project?.agreements_url_version || 1,
+                  title: "Master Agreement",
+                  sub: "Signed legal terms",
+                  icon: <FileSignature className="h-4 w-4" />,
+                  highlighted: false,
+                  iconWrap:
+                    "bg-purple-50 text-purple-600 border border-purple-100",
+                },
+                {
+                  key: "scope_of_work_url",
+                  url: project?.scope_of_work_url,
+                  version: project?.scope_of_work_url_version || 1,
+                  title: "Scope of Work (SOW)",
+                  sub: "Project deliverables spec",
+                  icon: <FileCheck2 className="h-4 w-4" />,
+                  highlighted: false,
+                  iconWrap: "bg-blue-50 text-blue-600 border border-blue-100",
+                },
+              ].map((link) => {
+                if (!link.url) return null;
+                const isMenuOpen = linkVersionMenu === link.key;
+                const displayUrl = getDisplayedLinkUrl(link);
+                const displayVersion =
+                  selectedLinkVersions[link.key] || link.version;
 
-              return (
-                <div key={link.key} className="relative">
-                  <div
-                    className={`rounded-2xl p-4 flex items-center justify-between gap-3 transition group ${
-                      link.highlighted
-                        ? "bg-[#fbf3db] border border-[#f7e3af] hover:shadow-xs"
-                        : "bg-white border border-[#e9e9e7] hover:shadow-xs"
-                    }`}
-                  >
-                    <a
-                      href={displayUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-3 min-w-0"
-                    >
-                      <div
-                        className={`h-9 w-9 rounded-xl flex items-center justify-center shrink-0 shadow-xs ${
-                          link.highlighted
-                            ? "bg-[#cb912f] text-white"
-                            : link.iconWrap
-                        }`}
-                      >
-                        {link.icon}
-                      </div>
-                      <div className="truncate">
-                        <h4 className="text-xs font-bold text-[#37352f]">
-                          {link.title}
-                        </h4>
-                        <p className="text-[10px] text-[#787774] truncate">
-                          {link.sub}
-                        </p>
-                      </div>
-                    </a>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleToggleLinkVersions(link.key);
-                        }}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold transition ${
-                          link.highlighted
-                            ? "bg-white/70 text-[#946a1e] hover:bg-white"
-                            : "bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-black"
-                        }`}
-                        title="View link version history"
-                      >
-                        <History className="h-2.5 w-2.5" />
-                        <span>v{displayVersion}</span>
-                      </button>
-                      <ArrowUpRight
-                        className={`h-4 w-4 shrink-0 ${
-                          link.highlighted
-                            ? "text-[#cb912f]"
-                            : "text-[#787774] group-hover:text-blue-600"
-                        } transition-transform`}
-                      />
-                    </div>
-                  </div>
-
-                  {isMenuOpen && (
+                return (
+                  <div key={link.key} className="relative">
                     <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="absolute right-0 top-full mt-1.5 w-72 bg-white border border-[#e5e7eb] rounded-xl shadow-2xl p-2 z-40 max-h-64 overflow-y-auto"
+                      className={`rounded-2xl p-4 flex items-center justify-between gap-3 transition group ${
+                        link.highlighted
+                          ? "bg-[#fbf3db] border border-[#f7e3af] hover:shadow-xs"
+                          : "bg-white border border-[#e9e9e7] hover:shadow-xs"
+                      }`}
                     >
-                      <div className="px-2 py-1 text-[10px] font-bold text-[#9ca3af] uppercase tracking-wider">
-                        Version History
-                      </div>
-
                       <a
-                        href={link.url}
+                        href={displayUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 transition mb-1"
+                        className="flex items-center gap-3 min-w-0"
                       >
-                        <span className="text-[11px] font-medium text-blue-800 truncate">
-                          Current
-                        </span>
-                        <span className="text-[10px] font-bold text-blue-600 shrink-0">
-                          v{link.version}
-                        </span>
+                        <div
+                          className={`h-9 w-9 rounded-xl flex items-center justify-center shrink-0 shadow-xs ${
+                            link.highlighted
+                              ? "bg-[#cb912f] text-white"
+                              : link.iconWrap
+                          }`}
+                        >
+                          {link.icon}
+                        </div>
+                        <div className="truncate">
+                          <h4 className="text-xs font-bold text-[#37352f]">
+                            {link.title}
+                          </h4>
+                          <p className="text-[10px] text-[#787774] truncate">
+                            {link.sub}
+                          </p>
+                        </div>
                       </a>
 
-                      {isLoadingLinkVersions ? (
-                        <div className="py-4 flex items-center justify-center text-[#9b9a97]">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        </div>
-                      ) : linkVersionData.length === 0 ? (
-                        <div className="py-3 text-center text-[10px] text-[#9b9a97] italic">
-                          No earlier versions archived.
-                        </div>
-                      ) : (
-                        linkVersionData.map((v) => (
-                          <a
-                            key={v.id}
-                            href={v.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition"
-                          >
-                            <span className="text-[11px] text-[#37352f] truncate">
-                              {v.archived_at
-                                ? format(
-                                    parseISO(v.archived_at),
-                                    "MMM dd, yyyy hh:mm a",
-                                  )
-                                : "Archived"}
-                            </span>
-                            <span className="text-[10px] font-bold text-gray-500 shrink-0">
-                              v{v.version}
-                            </span>
-                          </a>
-                        ))
-                      )}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleLinkVersions(link.key);
+                          }}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold transition ${
+                            link.highlighted
+                              ? "bg-white/70 text-[#946a1e] hover:bg-white"
+                              : "bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-black"
+                          }`}
+                          title="View link version history"
+                        >
+                          <History className="h-2.5 w-2.5" />
+                          <span>v{displayVersion}</span>
+                        </button>
+                        <ArrowUpRight
+                          className={`h-4 w-4 shrink-0 ${
+                            link.highlighted
+                              ? "text-[#cb912f]"
+                              : "text-[#787774] group-hover:text-blue-600"
+                          } transition-transform`}
+                        />
+                      </div>
                     </div>
-                  )}
-                </div>
-              );
-            })}
+
+                    {isMenuOpen && (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute right-0 top-full mt-1.5 w-72 bg-white border border-[#e5e7eb] rounded-xl shadow-2xl p-2 z-40 max-h-64 overflow-y-auto"
+                      >
+                        <div className="px-2 py-1 text-[10px] font-bold text-[#9ca3af] uppercase tracking-wider">
+                          Version History
+                        </div>
+
+                        <a
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 transition mb-1"
+                        >
+                          <span className="text-[11px] font-medium text-blue-800 truncate">
+                            Current
+                          </span>
+                          <span className="text-[10px] font-bold text-blue-600 shrink-0">
+                            v{link.version}
+                          </span>
+                        </a>
+
+                        {isLoadingLinkVersions ? (
+                          <div className="py-4 flex items-center justify-center text-[#9b9a97]">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          </div>
+                        ) : linkVersionData.length === 0 ? (
+                          <div className="py-3 text-center text-[10px] text-[#9b9a97] italic">
+                            No earlier versions archived.
+                          </div>
+                        ) : (
+                          linkVersionData.map((v) => (
+                            <a
+                              key={v.id}
+                              href={v.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition"
+                            >
+                              <span className="text-[11px] text-[#37352f] truncate">
+                                {v.archived_at
+                                  ? format(
+                                      parseISO(v.archived_at),
+                                      "MMM dd, yyyy hh:mm a",
+                                    )
+                                  : "Archived"}
+                              </span>
+                              <span className="text-[10px] font-bold text-gray-500 shrink-0">
+                                v{v.version}
+                              </span>
+                            </a>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* DYNAMIC MODULE TABS SWITCHER */}
       <div className="flex items-center justify-between border-b border-[#e9e9e7] pt-1">
@@ -1808,11 +2421,34 @@ export default function ProjectDashboard({
               </div>
             ) : (
               milestones.map((m) => {
-                const isCompleted = m.status === "complete";
-                const progress = m.sheet_progress || 0;
+                const sheetProgress = Math.min(
+                  Number(m.sheet_progress) || 0,
+                  100,
+                );
+                const isCompleted =
+                  m.status === "complete" || sheetProgress >= 100;
+                const progress = isCompleted ? 100 : sheetProgress;
+
                 return (
                   <div
                     key={m.id}
+                    onClick={() => {
+                      setSelectedMilestoneModal({
+                        ...m,
+                        subtasks: Array.isArray(m.subtasks) ? m.subtasks : [],
+                      });
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedMilestoneModal({
+                          ...m,
+                          subtasks: Array.isArray(m.subtasks) ? m.subtasks : [],
+                        });
+                      }
+                    }}
                     className={`p-3.5 rounded-xl border flex flex-col justify-between gap-0 transition ${
                       isCompleted
                         ? "bg-[#ecfdf5] border-[#a7f3d0] text-[#065f46]"
@@ -1820,19 +2456,47 @@ export default function ProjectDashboard({
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] uppercase font-bold text-[#9ca3af]">
-                        {m.due_date || "No date"}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {/* Quick Complete / Toggle Button */}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleToggleMilestone(m);
+                          }}
+                          className={`h-5 w-5 rounded-md border flex items-center justify-center transition ${
+                            isCompleted
+                              ? "bg-emerald-600 border-emerald-600 text-white"
+                              : "bg-white border-gray-300 text-transparent hover:border-emerald-600"
+                          }`}
+                          title={
+                            isCompleted ? "Reopen stage" : "Mark stage complete"
+                          }
+                        >
+                          <Check className="h-3.5 w-3.5 stroke-[3]" />
+                        </button>
+
+                        <span className="text-[10px] uppercase font-bold text-[#9ca3af]">
+                          {m.due_date || "No date"}
+                        </span>
+                      </div>
+
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => handleOpenStageModal(m)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleOpenStageModal(m);
+                          }}
                           className="p-1 text-[#9ca3af] hover:text-[#111827] rounded"
                           title="Edit Stage"
                         >
                           <Edit2 className="h-3 w-3" />
                         </button>
                         <button
-                          onClick={() => handleDeleteStage(m.id)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteStage(m.id);
+                          }}
                           className="p-1 text-[#9ca3af] hover:text-rose-600 rounded"
                           title="Delete Stage"
                         >
@@ -1841,9 +2505,9 @@ export default function ProjectDashboard({
                       </div>
                     </div>
 
-                    <div className="flex flex-col gap-3 mt-1">
+                    <div className="flex flex-col gap-3 mt-2">
                       <p
-                        className={`text-xs font-bold leading-tight ${isCompleted ? "line-through opacity-75" : ""}`}
+                        className={`text-xs font-bold leading-tight ${isCompleted ? "opacity-75" : ""}`}
                       >
                         {m.title}
                       </p>
@@ -1858,6 +2522,7 @@ export default function ProjectDashboard({
                               href={m.sheet_url}
                               target="_blank"
                               rel="noreferrer"
+                              onClick={(event) => event.stopPropagation()}
                               className="text-blue-600 hover:underline"
                             >
                               Sheet Link
@@ -1894,17 +2559,7 @@ export default function ProjectDashboard({
                 <KanbanIcon className="h-3.5 w-3.5 text-blue-600" />
                 <span>Kanban</span>
               </button>
-              <button
-                onClick={() => setActiveTab("timeline")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all shrink-0 ${
-                  activeTab === "timeline"
-                    ? "bg-white text-[#37352f] font-semibold shadow-xs"
-                    : "text-[#787774] hover:text-[#37352f]"
-                }`}
-              >
-                <CalendarRange className="h-3.5 w-3.5 text-blue-600" />
-                <span>Calendar</span>
-              </button>
+              
               <button
                 onClick={() => setActiveTab("table")}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all shrink-0 ${
@@ -2029,14 +2684,14 @@ export default function ProjectDashboard({
                               <div
                                 key={task.id}
                                 onClick={() => handleToggleTaskDone(task)}
-                                className={`group p-2.5 rounded-lg border text-xs leading-snug flex items-center justify-between gap-1.5 cursor-pointer shadow-2xs hover:opacity-90 transition ${getTaskTheme(
+                                className={`group p-2 sm:p-2.5 rounded-lg border text-xs leading-snug flex flex-col items-stretch justify-between gap-1.5 cursor-pointer shadow-2xs hover:opacity-90 transition sm:flex-row sm:items-center ${getTaskTheme(
                                   task.id,
                                 )}`}
                               >
-                                <span className="font-semibold">
+                                <span className="min-w-0 flex-1 line-clamp-2 font-semibold">
                                   {task.name}
                                 </span>
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1 self-end sm:self-auto">
                                   <span className="h-5 w-5 rounded-full bg-white/90 border border-black/10 text-[9px] font-extrabold flex items-center justify-center shrink-0">
                                     {emp.initials ||
                                       emp.name.slice(0, 2).toUpperCase()}
@@ -2074,14 +2729,14 @@ export default function ProjectDashboard({
                               <div
                                 key={task.id}
                                 onClick={() => handleToggleTaskDone(task)}
-                                className={`group p-2.5 rounded-lg border text-xs leading-snug flex items-center justify-between gap-1.5 cursor-pointer shadow-2xs hover:opacity-90 transition ${getTaskTheme(
+                                className={`group p-2 sm:p-2.5 rounded-lg border text-xs leading-snug flex flex-col items-stretch justify-between gap-1.5 cursor-pointer shadow-2xs hover:opacity-90 transition sm:flex-row sm:items-center ${getTaskTheme(
                                   task.id,
                                 )}`}
                               >
-                                <span className="font-semibold">
+                                <span className="min-w-0 flex-1 line-clamp-2 font-semibold">
                                   {task.name}
                                 </span>
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1 self-end sm:self-auto">
                                   <span className="h-5 w-5 rounded-full bg-white/90 border border-black/10 text-[9px] font-extrabold flex items-center justify-center shrink-0">
                                     {emp.initials ||
                                       emp.name.slice(0, 2).toUpperCase()}
@@ -2119,12 +2774,12 @@ export default function ProjectDashboard({
                               <div
                                 key={task.id}
                                 onClick={() => handleToggleTaskDone(task)}
-                                className="group p-2.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-xs leading-snug flex items-center justify-between gap-1.5 cursor-pointer shadow-2xs line-through opacity-75 transition"
+                                className="group p-2 sm:p-2.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-xs leading-snug flex flex-col items-stretch justify-between gap-1.5 cursor-pointer shadow-2xs line-through opacity-75 transition sm:flex-row sm:items-center"
                               >
-                                <span className="font-semibold">
+                                <span className="min-w-0 flex-1 line-clamp-2 font-semibold">
                                   {task.name}
                                 </span>
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1 self-end sm:self-auto">
                                   <span className="h-5 w-5 rounded-full bg-white/90 border border-black/10 text-[9px] font-extrabold flex items-center justify-center shrink-0">
                                     {emp.initials ||
                                       emp.name.slice(0, 2).toUpperCase()}
@@ -2164,6 +2819,101 @@ export default function ProjectDashboard({
               )}
             </div>
 
+            {/* STAGE DETAILS MODAL */}
+            {selectedMilestoneModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 p-3 sm:p-5">
+                <section
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={`${selectedMilestoneModal.title} stage details`}
+                  className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-[#e9e9e7] bg-[#f8f8f6] shadow-2xl"
+                >
+                  <header className="flex items-start justify-between gap-4 border-b border-[#e5e5e1] bg-white px-5 py-4">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-[#777772]">
+                        Project roadmap · Stage details
+                      </p>
+                      <h2 className="mt-1 truncate text-lg font-semibold text-[#30302e]">
+                        {selectedMilestoneModal.title}
+                      </h2>
+                      <p className="mt-1 text-xs text-[#787774]">
+                        Due {selectedMilestoneModal.due_date || "date not set"}
+                        {selectedMilestoneModal.sheet_progress != null &&
+                          ` · ${selectedMilestoneModal.sheet_progress}% complete`}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-medium text-[#777772]">
+                          Stage UUID
+                        </span>
+                        <code className="max-w-64 truncate rounded bg-[#f0f0ed] px-2 py-1 text-[10px] text-[#4c4c48]">
+                          {selectedMilestoneModal.id}
+                        </code>
+                        <button
+                          type="button"
+                          title="Copy stage UUID for the sheet script"
+                          aria-label="Copy stage UUID"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(
+                                String(selectedMilestoneModal.id),
+                              );
+                            } catch {
+                              alert(
+                                "Could not access the clipboard. Select and copy the stage UUID.",
+                              );
+                            }
+                          }}
+                          className="flex h-7 w-7 items-center justify-center rounded text-[#777772] hover:bg-[#f0f0ed] hover:text-[#30302e]"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {selectedMilestoneModal.sheet_url && (
+                        <a
+                          href={selectedMilestoneModal.sheet_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e5e5e1] bg-white px-2.5 text-xs font-medium text-[#5f5f5b] hover:bg-[#f4f4f1]"
+                        >
+                          Open sheet <ArrowUpRight className="h-3.5 w-3.5" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedMilestoneModal(null)}
+                        aria-label="Close stage details"
+                        className="flex h-8 w-8 items-center justify-center rounded-md text-[#787774] hover:bg-[#f4f4f1]"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                    <SubStagePanel
+                      stage={selectedMilestoneModal}
+                      onChange={(next) =>
+                        handleSaveSubstages(selectedMilestoneModal.id, next)
+                      }
+                    />
+
+                    <SheetsList stage={selectedMilestoneModal} />
+                  </div>
+
+                  <footer className="flex justify-end border-t border-[#e5e5e1] bg-white px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMilestoneModal(null)}
+                      className="h-8 rounded-md border border-[#e5e5e2] px-3 text-xs font-medium text-[#5f5f5b] hover:bg-[#f7f7f5]"
+                    >
+                      Done
+                    </button>
+                  </footer>
+                </section>
+              </div>
+            )}
             {/* Kanban Date Picker Overlay Modal */}
             {isKanbanCalendarOpen && (
               <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
@@ -2196,7 +2946,7 @@ export default function ProjectDashboard({
           </div>
         )}
 
-        {/* VIEW: JIRA-STYLE INTERACTIVE CALENDAR */}
+        {/* INTERACTIVE CALENDAR */}
         {activeTab === "timeline" && (
           <div className="bg-white border border-[#dfe1e6] rounded-2xl shadow-xl overflow-hidden">
             {/* Calendar Control Header */}
@@ -2633,282 +3383,290 @@ export default function ProjectDashboard({
         )}
 
         {/* --- ADMIN FILE TREE EXPLORER FOR DELIVERABLES --- */}
-        <div className="bg-white border border-[#e5e7eb] rounded-2xl p-5 sm:p-6 shadow-xs space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#f3f4f6] pb-3">
-            <div className="flex items-center gap-2">
-              <FolderOpen className="h-4 w-4 text-blue-600" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-[#374151]">
-                Deliverables File & Links ({currentTabDeliverables.length}{" "}
-                items)
-              </h3>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleOpenCreateFolderModal("root")}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#f7f6f3] text-[#37352f] hover:bg-[#e9e9e7] text-xs font-bold transition"
-              >
-                <FolderPlus className="h-3.5 w-3.5" />
-                <span>New Folder</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleOpenAddDeliverableModal("root")}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 text-blue-600 hover:bg-blue-100 text-xs font-bold transition"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Add Asset</span>
-              </button>
-            </div>
-          </div>
-
-          {(() => {
-            const renderDeliverable = (item, depth = 0) => {
-              const displayedItem = getDisplayedDeliverable(item);
-              const displayVersion =
-                selectedDeliverableVersions[item.id] || item.version || 1;
-
-              return (
-                <div
-                  key={item.id}
-                  className="group flex items-center justify-between gap-3 py-1.5 px-2 rounded-md hover:bg-blue-50/70 transition"
+        {/* {activeTab === "deliverables" && (
+          <div className="bg-white border border-[#e5e7eb] rounded-2xl p-5 sm:p-6 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#f3f4f6] pb-3">
+              <div className="flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-blue-600" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[#374151]">
+                  Deliverables File & Links ({currentTabDeliverables.length}{" "}
+                  items)
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleOpenCreateFolderModal("root")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#f7f6f3] text-[#37352f] hover:bg-[#e9e9e7] text-xs font-bold transition"
                 >
-                  <div
-                    className="flex items-center gap-2 min-w-0"
-                    style={{ paddingLeft: depth * 4 }}
-                  >
-                    <span className="text-gray-300">├──</span>
-                    {item.type === "file" ? (
-                      <FileText className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                    ) : (
-                      <Link2 className="h-3.5 w-3.5 text-blue-600 shrink-0" />
-                    )}
-                    <a
-                      href={displayedItem.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className={`truncate hover:underline font-sans font-medium text-xs ${
-                        item.type === "file"
-                          ? "text-emerald-700"
-                          : "text-blue-700"
-                      }`}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {displayedItem.title || item.title}
-                    </a>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleViewHistory(item);
-                      }}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-black text-[10px] font-bold font-sans shrink-0 transition"
-                      title="View version history"
-                    >
-                      <History className="h-2.5 w-2.5" />
-                      <span>v{displayVersion}</span>
-                    </button>
-                  </div>
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  <span>New Folder</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenAddDeliverableModal("root")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 text-blue-600 hover:bg-blue-100 text-xs font-bold transition"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>Add Asset</span>
+                </button>
+              </div>
+            </div>
 
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span className="hidden sm:inline text-[10px] text-gray-400 font-sans">
-                      by{" "}
-                      <span className="uppercase font-semibold text-gray-600">
-                        {item.uploaded_by || "admin"}
+            {(() => {
+              const renderDeliverable = (item, depth = 0) => {
+                const displayedItem = getDisplayedDeliverable(item);
+                const displayVersion =
+                  selectedDeliverableVersions[item.id] || item.version || 1;
+
+                return (
+                  <div
+                    key={item.id}
+                    className="group flex items-center justify-between gap-3 py-1.5 px-2 rounded-md hover:bg-blue-50/70 transition"
+                  >
+                    <div
+                      className="flex items-center gap-2 min-w-0"
+                      style={{ paddingLeft: depth * 4 }}
+                    >
+                      <span className="text-gray-300">├──</span>
+                      {item.type === "file" ? (
+                        <FileText className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                      ) : (
+                        <Link2 className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                      )}
+                      <a
+                        href={displayedItem.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`truncate hover:underline font-sans font-medium text-xs ${
+                          item.type === "file"
+                            ? "text-emerald-700"
+                            : "text-blue-700"
+                        }`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {displayedItem.title || item.title}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleViewHistory(item);
+                        }}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-black text-[10px] font-bold font-sans shrink-0 transition"
+                        title="View version history"
+                      >
+                        <History className="h-2.5 w-2.5" />
+                        <span>v{displayVersion}</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="hidden sm:inline text-[10px] text-gray-400 font-sans">
+                        by{" "}
+                        <span className="uppercase font-semibold text-gray-600">
+                          {item.uploaded_by || "admin"}
+                        </span>
+                        {item.created_at
+                          ? ` • ${format(parseISO(item.created_at), "MMM dd, yyyy")}`
+                          : ""}
                       </span>
-                      {item.created_at
-                        ? ` • ${format(parseISO(item.created_at), "MMM dd, yyyy")}`
-                        : ""}
-                    </span>
-                    {item.uploaded_by === "admin" && (
-                      <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                      {item.uploaded_by === "admin" && (
+                        <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenAddDeliverableModal(
+                                item.folder_id || "root",
+                                item,
+                              )
+                            }
+                            className="p-0.5 text-gray-500 hover:text-black"
+                            title="Edit / Move Asset"
+                          >
+                            <Edit2 className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteDeliverable(item.id)}
+                            className="p-0.5 text-gray-500 hover:text-rose-600"
+                            title="Delete Asset"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              };
+
+              const renderFolder = (folder, depth = 0) => {
+                const isExpanded = Boolean(expandedFolders[folder.id]);
+                const children = projectFolders.filter(
+                  (f) => f.parent_id === folder.id,
+                );
+                const assets = currentTabDeliverables.filter(
+                  (item) => item.folder_id === folder.id,
+                );
+
+                return (
+                  <div key={folder.id} className="space-y-1">
+                    <div
+                      className="group flex items-center justify-between gap-2 py-1 px-2 rounded-lg hover:bg-gray-200/60 text-[#374151] transition"
+                      style={{ marginLeft: depth * 18 }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleFolder(folder.id)}
+                        className="flex items-center gap-1.5 min-w-0 cursor-pointer text-left"
+                      >
+                        {isExpanded ? (
+                          <ChevronDown className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                        )}
+                        {isExpanded ? (
+                          <FolderOpen className="h-4 w-4 text-amber-500 fill-amber-400 shrink-0" />
+                        ) : (
+                          <Folder className="h-4 w-4 text-amber-500 fill-amber-400 shrink-0" />
+                        )}
+                        <span className="truncate font-semibold">
+                          {folder.name}
+                        </span>
+                        <span className="text-[10px] text-gray-400 font-sans">
+                          ({assets.length})
+                        </span>
+                      </button>
+
+                      <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 shrink-0">
                         <button
                           type="button"
                           onClick={() =>
-                            handleOpenAddDeliverableModal(
-                              item.folder_id || "root",
-                              item,
-                            )
+                            handleOpenAddDeliverableModal(folder.id)
                           }
-                          className="p-0.5 text-gray-500 hover:text-black"
-                          title="Edit / Move Asset"
+                          className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                          title="Add asset here"
+                        >
+                          <Plus className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCreateFolderModal(folder.id)}
+                          className="p-1 text-gray-500 hover:bg-white rounded"
+                          title="New subfolder"
+                        >
+                          <FolderPlus className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRenameFolder(folder)}
+                          className="p-1 text-gray-500 hover:bg-white rounded"
+                          title="Rename folder"
                         >
                           <Edit2 className="h-3 w-3" />
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleDeleteDeliverable(item.id)}
-                          className="p-0.5 text-gray-500 hover:text-rose-600"
-                          title="Delete Asset"
+                          onClick={() => handleDeleteFolder(folder.id)}
+                          className="p-1 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded"
+                          title="Delete folder"
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
+                    </div>
+
+                    {isExpanded && (
+                      <div
+                        className="space-y-1 border-l border-dashed border-gray-300 ml-4"
+                        style={{ marginLeft: depth * 18 + 16 }}
+                      >
+                        {children.map((child) =>
+                          renderFolder(child, depth + 1),
+                        )}
+                        {assets.map((item) =>
+                          renderDeliverable(item, depth + 1),
+                        )}
+                        {children.length === 0 && assets.length === 0 && (
+                          <div className="py-1 pl-5 text-[11px] text-gray-400 italic font-sans">
+                            empty folder
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
-                </div>
-              );
-            };
+                );
+              };
 
-            const renderFolder = (folder, depth = 0) => {
-              const isExpanded = Boolean(expandedFolders[folder.id]);
-              const children = projectFolders.filter(
-                (f) => f.parent_id === folder.id,
+              const rootFolders = projectFolders.filter(
+                (folder) => !folder.parent_id || folder.parent_id === "root",
               );
-              const assets = currentTabDeliverables.filter(
-                (item) => item.folder_id === folder.id,
+              const unfiled = currentTabDeliverables.filter(
+                (item) => !item.folder_id,
               );
 
               return (
-                <div key={folder.id} className="space-y-1">
-                  <div
-                    className="group flex items-center justify-between gap-2 py-1 px-2 rounded-lg hover:bg-gray-200/60 text-[#374151] transition"
-                    style={{ marginLeft: depth * 18 }}
-                  >
+                <div className="font-mono text-sm space-y-1 bg-[#fafafa] border border-[#e5e7eb] rounded-xl p-4">
+                  <div className="flex items-center justify-between gap-2 py-1 px-2 rounded-lg hover:bg-gray-200/60 transition">
                     <button
                       type="button"
-                      onClick={() => toggleFolder(folder.id)}
-                      className="flex items-center gap-1.5 min-w-0 cursor-pointer text-left"
+                      onClick={() => toggleFolder("root")}
+                      className="flex items-center gap-1.5 min-w-0 text-[#111827] font-bold cursor-pointer"
                     >
-                      {isExpanded ? (
-                        <ChevronDown className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                      {expandedFolders.root ? (
+                        <ChevronDown className="h-3.5 w-3.5 text-gray-500" />
                       ) : (
-                        <ChevronRight className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                        <ChevronRight className="h-3.5 w-3.5 text-gray-500" />
                       )}
-                      {isExpanded ? (
-                        <FolderOpen className="h-4 w-4 text-amber-500 fill-amber-400 shrink-0" />
-                      ) : (
-                        <Folder className="h-4 w-4 text-amber-500 fill-amber-400 shrink-0" />
-                      )}
-                      <span className="truncate font-semibold">
-                        {folder.name}
-                      </span>
-                      <span className="text-[10px] text-gray-400 font-sans">
-                        ({assets.length})
+                      <FolderOpen className="h-4 w-4 text-amber-500 fill-amber-400" />
+                      <span className="truncate">
+                        {project?.title?.toLowerCase().replace(/\s+/g, "-") ||
+                          "workspace"}
                       </span>
                     </button>
-
-                    <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenAddDeliverableModal(folder.id)}
-                        className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-                        title="Add asset here"
-                      >
-                        <Plus className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenCreateFolderModal(folder.id)}
-                        className="p-1 text-gray-500 hover:bg-white rounded"
-                        title="New subfolder"
-                      >
-                        <FolderPlus className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRenameFolder(folder)}
-                        className="p-1 text-gray-500 hover:bg-white rounded"
-                        title="Rename folder"
-                      >
-                        <Edit2 className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteFolder(folder.id)}
-                        className="p-1 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded"
-                        title="Delete folder"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenCreateFolderModal("root")}
+                      className="p-1 text-gray-500 hover:text-blue-600 rounded"
+                      title="New folder"
+                    >
+                      <FolderPlus className="h-3.5 w-3.5" />
+                    </button>
                   </div>
 
-                  {isExpanded && (
-                    <div
-                      className="space-y-1 border-l border-dashed border-gray-300 ml-4"
-                      style={{ marginLeft: depth * 18 + 16 }}
-                    >
-                      {children.map((child) => renderFolder(child, depth + 1))}
-                      {assets.map((item) => renderDeliverable(item, depth + 1))}
-                      {children.length === 0 && assets.length === 0 && (
-                        <div className="py-1 pl-5 text-[11px] text-gray-400 italic font-sans">
-                          empty folder
+                  {expandedFolders.root && (
+                    <div className="pl-5 space-y-1 border-l border-dashed border-gray-300 ml-2 mt-1">
+                      {rootFolders.map((folder) => renderFolder(folder))}
+
+                      {unfiled.length > 0 && (
+                        <div className="space-y-1 pt-1">
+                          <div className="flex items-center gap-1.5 py-1 px-2 text-[#6b7280] font-semibold">
+                            <Folder className="h-4 w-4 text-gray-400" />
+                            <span>Unfiled</span>
+                            <span className="text-[10px] text-gray-400 font-sans">
+                              ({unfiled.length})
+                            </span>
+                          </div>
+                          <div className="pl-5 border-l border-dashed border-gray-300 ml-2">
+                            {unfiled.map((item) => renderDeliverable(item, 1))}
+                          </div>
+                        </div>
+                      )}
+
+                      {rootFolders.length === 0 && unfiled.length === 0 && (
+                        <div className="py-8 text-center text-[11px] text-gray-400 italic font-sans">
+                          No folders or assets yet. Create a folder or add an
+                          asset.
                         </div>
                       )}
                     </div>
                   )}
                 </div>
               );
-            };
-
-            const rootFolders = projectFolders.filter(
-              (folder) => !folder.parent_id || folder.parent_id === "root",
-            );
-            const unfiled = currentTabDeliverables.filter(
-              (item) => !item.folder_id,
-            );
-
-            return (
-              <div className="font-mono text-sm space-y-1 bg-[#fafafa] border border-[#e5e7eb] rounded-xl p-4">
-                <div className="flex items-center justify-between gap-2 py-1 px-2 rounded-lg hover:bg-gray-200/60 transition">
-                  <button
-                    type="button"
-                    onClick={() => toggleFolder("root")}
-                    className="flex items-center gap-1.5 min-w-0 text-[#111827] font-bold cursor-pointer"
-                  >
-                    {expandedFolders.root ? (
-                      <ChevronDown className="h-3.5 w-3.5 text-gray-500" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5 text-gray-500" />
-                    )}
-                    <FolderOpen className="h-4 w-4 text-amber-500 fill-amber-400" />
-                    <span className="truncate">
-                      {project?.title?.toLowerCase().replace(/\s+/g, "-") ||
-                        "workspace"}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenCreateFolderModal("root")}
-                    className="p-1 text-gray-500 hover:text-blue-600 rounded"
-                    title="New folder"
-                  >
-                    <FolderPlus className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                {expandedFolders.root && (
-                  <div className="pl-5 space-y-1 border-l border-dashed border-gray-300 ml-2 mt-1">
-                    {rootFolders.map((folder) => renderFolder(folder))}
-
-                    {unfiled.length > 0 && (
-                      <div className="space-y-1 pt-1">
-                        <div className="flex items-center gap-1.5 py-1 px-2 text-[#6b7280] font-semibold">
-                          <Folder className="h-4 w-4 text-gray-400" />
-                          <span>Unfiled</span>
-                          <span className="text-[10px] text-gray-400 font-sans">
-                            ({unfiled.length})
-                          </span>
-                        </div>
-                        <div className="pl-5 border-l border-dashed border-gray-300 ml-2">
-                          {unfiled.map((item) => renderDeliverable(item, 1))}
-                        </div>
-                      </div>
-                    )}
-
-                    {rootFolders.length === 0 && unfiled.length === 0 && (
-                      <div className="py-8 text-center text-[11px] text-gray-400 italic font-sans">
-                        No folders or assets yet. Create a folder or add an
-                        asset.
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-        </div>
+            })()}
+          </div>
+        )} */}
       </div>
 
       {/* MODAL: ADD DYNAMIC PROJECT TAB */}
@@ -3597,138 +4355,24 @@ export default function ProjectDashboard({
       )}
 
       {/* STAGE EDIT / ADD MODAL WITH POPUP CALENDAR */}
-      {isStageModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="w-full max-w-md bg-white border border-[#e9e9e7] rounded-2xl shadow-2xl p-6">
-            <div className="flex items-center justify-between pb-3 border-b border-[#e9e9e7]">
-              <h2 className="text-base font-bold text-[#111827]">
-                {editingStage ? "Edit Stage" : "Add Project Stage"}
-              </h2>
-              <button
-                onClick={() => setIsStageModalOpen(false)}
-                className="p-1 text-[#6b7280] hover:text-black"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <form onSubmit={handleSaveStage} className="space-y-4 pt-4 text-xs">
-              <div>
-                <label className="block font-semibold text-[#111827] mb-1">
-                  Stage Name *
-                </label>
-                <input
-                  required
-                  placeholder="e.g. Design, Development, QC..."
-                  value={stageTitle}
-                  onChange={(e) => setStageTitle(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-[#e5e7eb] bg-[#f9fafb] text-xs outline-none focus:bg-white focus:border-blue-600 transition"
-                />
-              </div>
 
-              <div>
-                <label className="block font-semibold text-[#111827] mb-1">
-                  Target Due Date *
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setIsStageCalendarOpen(true)}
-                  className="w-full h-9 px-3 rounded-lg bg-[#f9fafb] border border-[#e5e7eb] text-xs font-medium text-[#111827] flex items-center justify-between hover:bg-white hover:border-blue-600 transition"
-                >
-                  <span className="flex items-center gap-2">
-                    <CalendarIcon className="h-3.5 w-3.5 text-[#6b7280]" />
-                    {stageDueDate
-                      ? typeof stageDueDate === "string"
-                        ? stageDueDate
-                        : format(stageDueDate, "MMM dd, yyyy")
-                      : "Select due date..."}
-                  </span>
-                  <span className="text-[10px] text-blue-600 font-bold uppercase">
-                    Pick Date
-                  </span>
-                </button>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-[#111827] mb-1">
-                  Tracker Sheet URL
-                </label>
-                <input
-                  placeholder="https://docs.google.com/spreadsheets/d/..."
-                  value={stageSheetUrl}
-                  onChange={(e) => setStageSheetUrl(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-[#e5e7eb] bg-[#f9fafb] text-xs outline-none focus:bg-white focus:border-blue-600 transition"
-                />
-              </div>
-              {editingStage && (
-                <div className="p-3 mb-4 rounded-lg bg-blue-50 border border-blue-200">
-                  <label className="block font-bold text-blue-800 text-[10px] uppercase tracking-wider mb-1">
-                    Stage ID (Paste into the App Script)
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 text-xs text-blue-900 font-mono bg-white px-2 py-1.5 rounded border border-blue-100 select-all">
-                      {editingStage.id}
-                    </code>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-4 border-t border-[#e5e7eb]">
-                <button
-                  type="button"
-                  onClick={() => setIsStageModalOpen(false)}
-                  className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-[#6b7280] hover:bg-[#f3f4f6]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSavingStage}
-                  className="px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition"
-                >
-                  {isSavingStage ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    "Save Stage"
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-
-          {/* Popup Calendar for Stage Modal */}
-          {isStageCalendarOpen && (
-            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
-              <div className="w-full max-w-[320px] rounded-2xl border border-[#e5e7eb] bg-white p-4 shadow-2xl">
-                <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#e5e7eb]">
-                  <span className="text-xs font-bold text-[#111827]">
-                    Select Target Date
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsStageCalendarOpen(false)}
-                    className="p-1 text-[#6b7280] hover:text-black rounded"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="flex justify-center [&_.rdp]:m-0 [&_.rdp-table]:max-w-full [&_.rdp-cell]:p-0.5">
-                  <DayPicker
-                    mode="single"
-                    selected={
-                      stageDueDate instanceof Date ? stageDueDate : new Date()
-                    }
-                    onSelect={(d) => {
-                      if (d) setStageDueDate(d);
-                      setIsStageCalendarOpen(false);
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
+      <StageSetupModal
+        isOpen={isStageModalOpen}
+        onClose={() => {
+          setIsStageModalOpen(false);
+          setEditingStage(null);
+        }}
+        onSave={handleSaveStage}
+        initialData={editingStage}
+        projectId={project?.id}
+      />
+      {/* <StageSetupModal
+        isOpen={isStageModalOpen}
+        onClose={() => setIsStageModalOpen(false)}
+        onSave={handleSaveStage}
+        initialData={editingStage}
+        projectId={project?.id}
+      /> */}
       {/* TASK INSPECTOR MODAL */}
       {selectedTaskModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xs p-4">
@@ -3897,7 +4541,7 @@ export default function ProjectDashboard({
       )}
       {/* UPDATE NOTIFICATION POPUP */}
       {updateAvailable && (
-        <div 
+        <div
           className="fixed bottom-6 right-6 flex items-center gap-4 rounded-xl border border-[#e9e9e7] bg-white p-4 shadow-2xl transition-all"
           style={{ zIndex: 99999 }}
         >

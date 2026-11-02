@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { supabase, uploadDeliverableFile } from "../lib/supabase";
 import {
   Plus,
@@ -31,7 +32,13 @@ function isValidUrl(string) {
   );
 }
 
-export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
+export default function AllProjectsTab({
+  projects,
+  onSelect,
+  onRefresh,
+  openCreate = false,
+  onCreateOpened,
+}) {
   const [view, setView] = useState("grid"); // "grid" | "timeline"
   const [employees, setEmployees] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -53,7 +60,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
   const [tier, setTier] = useState("Startup");
   const [customTier, setCustomTier] = useState("");
 
-  const [selectedDate, setSelectedDate] = useState(new Date(2026, 8, 30));
+  const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
 
   const [feedbackUrl, setFeedbackUrl] = useState("");
@@ -61,6 +68,23 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
   const [scopeUrl, setScopeUrl] = useState("");
 
   const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (!openCreate) return;
+    setTitle("");
+    setClient("");
+    setLocation("");
+    setSelectedDate(new Date());
+    setIconFile(null);
+    setSelectedTeam([]);
+    setTier("Startup");
+    setCustomTier("");
+    setFeedbackUrl("");
+    setAgreementsUrl("");
+    setScopeUrl("");
+    setIsModalOpen(true);
+    onCreateOpened?.();
+  }, [openCreate, onCreateOpened]);
 
   // Fetch employees for team checkboxes
   useEffect(() => {
@@ -135,7 +159,8 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
     setAgreementsUrl("");
     setScopeUrl("");
     setIsModalOpen(false);
-    onRefresh();
+    onCreateOpened?.();
+    await onRefresh?.();
   };
 
   const handleOpenEdit = (e, proj) => {
@@ -285,6 +310,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
               setTitle("");
               setClient("");
               setLocation("");
+              setSelectedDate(new Date());
               setIconFile(null);
               setSelectedTeam([]);
               setTier("Startup");
@@ -294,7 +320,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
               setScopeUrl("");
               setIsModalOpen(true);
             }}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold shadow-xs hover:bg-blue-700 transition"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#20201e] text-white text-xs font-semibold shadow-xs hover:bg-black transition"
           >
             <Plus className="h-3.5 w-3.5" />
             New Project
@@ -356,7 +382,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
                     </div>
 
                     {/* Title with Company Icon */}
-                    <h3 className="text-base font-bold text-[#37352f] flex items-center gap-2.5 ">
+                    <h3 className="flex min-w-0 items-center gap-2.5 text-base font-bold text-[#37352f]">
                       {proj.icon ? (
                         <img
                           src={proj.icon}
@@ -368,10 +394,10 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
                           {proj.title?.charAt(0) || "P"}
                         </div>
                       )}
-                      <span className="truncate">{proj.title}</span>
+                      <span className="min-w-0 line-clamp-2">{proj.title}</span>
                     </h3>
 
-                    <div className="flex items-center justify-between text-xs text-[#787774] mt-1">
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-[#787774] mt-1">
                       <span>{proj.client_name}</span>
                       {proj.location && (
                         <span className="flex items-center gap-1">
@@ -398,20 +424,20 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
 
                     {/* Assigned Team Highlights */}
                     {assignedMembers.length > 0 && (
-                      <div className=" pt-3 flex items-center justify-between">
+                      <div className="pt-3 flex items-start justify-between gap-3">
                         <span className="text-[12px] font-semibold text-[#787774] uppercase tracking-wider">
                           Assigned Team:
                         </span>
-                        <div className="flex items-center -space-x-1.5 overflow-hidden">
+                        <div className="flex max-w-[65%] flex-wrap items-center justify-end gap-1 overflow-visible">
                           {assignedMembers.map((member) => (
                             <div
                               key={member.id}
                               title={`${member.name} (${member.role || "Member"})`}
-                              className={`h-6 w-6 rounded-full text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white ${
+                              className={`h-6 w-6 shrink-0 rounded-full text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white dark:ring-transparent ${
                                 member.color || "bg-blue-600"
                               }`}
                             >
-                              {member.initials}
+                              {member.initials || member.name?.slice(0, 2).toUpperCase()}
                             </div>
                           ))}
                         </div>
@@ -431,10 +457,10 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
       )}
 
       {/* Modal Dialog for Creation */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
-          <div className="relative w-full max-w-lg rounded-2xl border border-[#e9e9e7] bg-white p-5 sm:p-6 shadow-2xl max-h-[90dvh] flex flex-col my-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-[#e9e9e7] shrink-0">
+      {isModalOpen && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+          <div className="relative w-full max-w-lg rounded-2xl border border-[#e9e9e7] bg-white p-5 sm:p-6 shadow-2xl max-h-[90dvh] flex flex-col my-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            <div className="flex items-center justify-between pb-3 border-b border-[#e9e9e7] shrink-0  scrollbar-none">
               <div>
                 <h3 className="text-base font-bold text-[#18181b]">
                   Create Client Workspace
@@ -454,7 +480,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
 
             <form
               onSubmit={handleCreate}
-              className="space-y-4 text-xs overflow-y-auto pt-4 pr-1"
+              className="space-y-4 text-xs overflow-y-auto pt-4 pr-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -521,7 +547,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
                   <Users className="h-3.5 w-3.5 text-blue-600" />
                   Assign Team Members
                 </label>
-                <div className="max-h-36 overflow-y-auto border border-[#e9e9e7] rounded-lg p-2.5 space-y-2 bg-[#fafafa]">
+                <div className="max-h-36 overflow-y-auto border border-[#e9e9e7] rounded-lg p-2.5 space-y-2 bg-[#fafafa] [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
                   {employees.length === 0 ? (
                     <p className="text-[11px] text-[#787774] italic">
                       No employees found.
@@ -672,7 +698,7 @@ export default function AllProjectsTab({ projects, onSelect, onRefresh }) {
             </form>
           </div>
         </div>
-      )}
+      , document.body)}
 
       {/* Edit Project Modal */}
       {isEditModalOpen && (
