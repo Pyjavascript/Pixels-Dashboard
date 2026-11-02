@@ -72,8 +72,8 @@ function ClientRouteWrapper() {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchClientData = async () => {
-    setLoading(true);
+  const fetchClientData = async (silent = false) => {
+    if (!silent) setLoading(true);
     const { data: projData } = await supabase
       .from("projects")
       .select("*, milestones(*), tasks(*), deliverables(*)")

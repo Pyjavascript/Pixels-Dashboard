@@ -9,8 +9,10 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
  * Helper to upload files to Supabase Storage bucket 'project-assets'
  */
 export async function uploadDeliverableFile(file, projectId) {
-  const fileExt = file.name.split(".").pop();
-  const filePath = `${projectId}/${Date.now()}.${fileExt}`;
+  // Random suffix keeps parallel uploads from colliding on the same timestamp;
+  // the name is rebuilt because storage keys reject many filename characters.
+  const fileExt = file.name.match(/\.[a-z0-9]+$/i)?.[0] || "";
+  const filePath = `${projectId}/${Date.now()}_${Math.random().toString(36).substring(2, 9)}${fileExt}`;
 
   const { error: uploadError } = await supabase.storage
     .from("project-assets")

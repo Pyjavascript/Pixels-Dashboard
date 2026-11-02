@@ -1026,7 +1026,7 @@ export default function ClientPortal({
       {activePortalView === "documents" && (
         <ClientLibrary
           project={project}
-          onRefresh={onRefresh}
+          onRefresh={() => onRefresh?.(true)}
           uploaderRole="client"
           mode="documents"
         />
@@ -1288,7 +1288,7 @@ export default function ClientPortal({
       {activePortalView === "library" && (
         <ClientLibrary
           project={project}
-          onRefresh={onRefresh}
+          onRefresh={() => onRefresh?.(true)}
           uploaderRole="client"
           mode="deliverables"
         />

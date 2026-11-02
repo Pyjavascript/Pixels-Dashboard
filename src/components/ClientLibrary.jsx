@@ -1,7 +1,15 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowUpRight,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -23,6 +31,13 @@ import {
 } from "lucide-react";
 import { supabase, uploadDeliverableFile } from "../lib/supabase";
 import { fileKind } from "../lib/workspace";
+import {
+  planFromDrop,
+  planFromFolderInput,
+  runPool,
+} from "../lib/folderUpload";
+
+const UPLOAD_CONCURRENCY = 4;
 
 const FILTERS = [
   ["all", "All files"],
@@ -34,6 +49,11 @@ const FILTERS = [
 
 const sameId = (left, right) =>
   String(left ?? "root") === String(right ?? "root");
+
+const isFileDrag = (event) =>
+  Array.from(event.dataTransfer?.types || []).includes("Files");
+
+const isFileInput = (target) => Boolean(target.closest?.('input[type="file"]'));
 
 function importantLinks(project) {
   return [
@@ -132,6 +152,17 @@ export default function ClientLibrary({
   const [assetFile, setAssetFile] = useState(null);
   const [assetFolderId, setAssetFolderId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [dropFolderKey, setDropFolderKey] = useState(null);
+  const [bulkUpload, setBulkUpload] = useState(null);
+  const isBulkUploadRunning = useRef(false);
+  const isBulkUploading = Boolean(bulkUpload?.isRunning);
+
+  useEffect(() => {
+    if (!isBulkUploading) return undefined;
+    const warnBeforeLeaving = (event) => event.preventDefault();
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [isBulkUploading]);
 
   useEffect(() => {
     let isCurrent = true;
@@ -467,34 +498,215 @@ export default function ClientLibrary({
     onRefresh?.();
   };
 
-  const createFolder = async (event) => {
-    event.preventDefault();
-    if (!folderName.trim()) return;
-    const parent = folders.find((folder) => sameId(folder.id, folderParentId));
-    const { data, error } = await supabase
+  const insertFolder = async (name, parent) => {
+    const result = await supabase
       .from("project_folders")
       .insert({
         project_id: project.id,
-        parent_id: folderParentId || "root",
-        name: folderName.trim(),
+        parent_id: parent?.id || "root",
+        name,
         tab_id: parent?.tab_id || "tracker",
       })
       .select()
       .single();
+    if (!result.error) {
+      const created = result.data;
+      setFolders((current) => [...current, created]);
+      setExpandedFolders((current) => ({
+        ...current,
+        [parent?.id || "root"]: true,
+        [created.id]: true,
+      }));
+    }
+    return result;
+  };
+
+  const createFolder = async (event) => {
+    event.preventDefault();
+    if (!folderName.trim()) return;
+    const parent = folders.find((folder) => sameId(folder.id, folderParentId));
+    const { error } = await insertFolder(folderName.trim(), parent);
     if (error) {
       alert(`Could not create folder: ${error.message}`);
       return;
     }
-    setFolders((current) => [...current, data]);
-    setExpandedFolders((current) => ({
-      ...current,
-      [folderParentId || "root"]: true,
-      [data.id]: true,
-    }));
     setFolderName("");
     setIsFolderModalOpen(false);
     onRefresh?.();
   };
+
+  const runBulkUpload = async (plan, targetFolderId) => {
+    if (isBulkUploadRunning.current) {
+      alert("Please wait for the current upload to finish.");
+      return;
+    }
+    if (
+      plan.files.length === 0 &&
+      plan.folderPaths.length === 0 &&
+      plan.unreadable.length === 0
+    ) {
+      alert("There are no files to upload in that folder.");
+      return;
+    }
+
+    isBulkUploadRunning.current = true;
+    setBulkUpload({
+      plan,
+      targetFolderId,
+      total: plan.files.length,
+      done: 0,
+      uploaded: 0,
+      skipped: plan.skipped,
+      failed: plan.unreadable,
+      isRunning: true,
+    });
+
+    const addFailure = (failure) =>
+      setBulkUpload((current) => ({
+        ...current,
+        failed: [...current.failed, failure],
+      }));
+
+    // Keyed by path inside the upload. A missing key means that folder could
+    // not be created; re-uploading into an existing folder merges with it.
+    const target = folders.find((folder) => sameId(folder.id, targetFolderId));
+    const folderRows = new Map([["", target || null]]);
+    for (const path of plan.folderPaths) {
+      const key = path.join("/");
+      const parent = folderRows.get(path.slice(0, -1).join("/"));
+      if (parent === undefined) continue;
+
+      const name = path[path.length - 1];
+      const existing = folders.find(
+        (folder) => sameId(folder.parent_id, parent?.id) && folder.name === name,
+      );
+      if (existing) {
+        folderRows.set(key, existing);
+        continue;
+      }
+      const { data, error } = await insertFolder(name, parent);
+      if (error) {
+        addFailure({ label: `${key}/`, message: error.message });
+      } else {
+        folderRows.set(key, data);
+      }
+    }
+
+    await runPool(plan.files, UPLOAD_CONCURRENCY, async (planFile) => {
+      const { file, folderPath } = planFile;
+      const key = folderPath.join("/");
+      try {
+        const parent = folderRows.get(key);
+        if (parent === undefined) {
+          throw new Error("Its folder could not be created.");
+        }
+        const url = await uploadDeliverableFile(file, project.id);
+        const { data, error } = await supabase
+          .from("deliverables")
+          .insert({
+            title: file.name,
+            type: "file",
+            url,
+            folder_id: parent?.id || null,
+            tab_id: parent?.tab_id || "tracker",
+            project_id: project.id,
+            uploaded_by: uploaderRole,
+          })
+          .select()
+          .single();
+        if (error) throw error;
+
+        setAssets((current) => [...current, data]);
+        setBulkUpload((current) => ({
+          ...current,
+          done: current.done + 1,
+          uploaded: current.uploaded + 1,
+        }));
+      } catch (error) {
+        addFailure({
+          label: key ? `${key}/${file.name}` : file.name,
+          message: error.message,
+          planFile,
+        });
+        setBulkUpload((current) => ({ ...current, done: current.done + 1 }));
+      }
+    });
+
+    isBulkUploadRunning.current = false;
+    setBulkUpload((current) => ({ ...current, isRunning: false }));
+    onRefresh?.();
+  };
+
+  const retryFailedUploads = () => {
+    const { plan, targetFolderId, failed } = bulkUpload;
+    runBulkUpload(
+      {
+        ...plan,
+        files: failed.filter((item) => item.planFile).map((item) => item.planFile),
+        unreadable: [],
+        skipped: 0,
+      },
+      targetFolderId,
+    );
+  };
+
+  const handleFolderPicked = (event) => {
+    const plan = planFromFolderInput(Array.from(event.target.files || []));
+    event.target.value = "";
+    setIsAssetModalOpen(false);
+    runBulkUpload(plan, assetFolderId);
+  };
+
+  const canDropFiles =
+    !documentsMode && (!isAssetModalOpen || assetType === "folder");
+
+  const dropKeyFor = (event) =>
+    event.target.closest?.("[data-drop-folder]")?.dataset.dropFolder ??
+    String(currentFolderId ?? "root");
+
+  // Listens on the window so a drop anywhere on the page counts, instead of
+  // navigating the tab to the file. File inputs keep their native behaviour.
+  const handleWindowDragOver = useEffectEvent((event) => {
+    if (!isFileDrag(event) || isFileInput(event.target)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = canDropFiles ? "copy" : "none";
+    if (canDropFiles) setDropFolderKey(dropKeyFor(event));
+  });
+
+  const handleWindowDragLeave = useEffectEvent((event) => {
+    if (!event.relatedTarget) setDropFolderKey(null);
+  });
+
+  const handleWindowDrop = useEffectEvent(async (event) => {
+    setDropFolderKey(null);
+    if (!isFileDrag(event) || isFileInput(event.target)) return;
+    event.preventDefault();
+    if (!canDropFiles) return;
+    const dropKey = dropKeyFor(event);
+    setIsAssetModalOpen(false);
+    const plan = await planFromDrop(event.dataTransfer);
+    runBulkUpload(plan, dropKey === "root" ? null : dropKey);
+  });
+
+  useEffect(() => {
+    if (documentsMode) return undefined;
+    const onDragOver = (event) => handleWindowDragOver(event);
+    const onDragLeave = (event) => handleWindowDragLeave(event);
+    const onDrop = (event) => handleWindowDrop(event);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [documentsMode]);
+
+  const dropFolderName =
+    dropFolderKey === "root"
+      ? project.title
+      : folders.find((folder) => sameId(folder.id, dropFolderKey))?.name;
 
   const openFolderModal = (parentId = currentFolderId) => {
     setFolderParentId(parentId);
@@ -522,24 +734,72 @@ export default function ClientLibrary({
   };
 
   const deleteFolder = async (folder) => {
-    const hasChildren = folders.some((entry) =>
-      sameId(entry.parent_id, folder.id),
-    );
-    const hasItems = assets.some((item) => sameId(item.folder_id, folder.id));
-    if (hasChildren || hasItems) {
-      alert("Move or remove this folder's contents before deleting it.");
+    if (isBulkUploadRunning.current) {
+      alert("Please wait for the current upload to finish.");
       return;
     }
-    if (!window.confirm(`Delete the empty folder "${folder.name}"?`)) return;
-    const { error } = await supabase
+
+    const collectFolderIds = (folderId) => [
+      folderId,
+      ...folders
+        .filter((entry) => sameId(entry.parent_id, folderId))
+        .flatMap((entry) => collectFolderIds(entry.id)),
+    ];
+    const folderIds = collectFolderIds(folder.id);
+    const subfolderCount = folderIds.length - 1;
+    const itemCount = assets.filter((item) =>
+      folderIds.some((id) => sameId(id, item.folder_id)),
+    ).length;
+
+    const contents = [
+      itemCount && `${itemCount} ${itemCount === 1 ? "item" : "items"}`,
+      subfolderCount &&
+        `${subfolderCount} ${subfolderCount === 1 ? "subfolder" : "subfolders"}`,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    const message = contents
+      ? `Delete "${folder.name}" and everything inside it (${contents})? This cannot be undone.`
+      : `Delete the empty folder "${folder.name}"?`;
+    if (!window.confirm(message)) return;
+
+    // Row-level security reports a blocked delete as success with zero rows,
+    // so check what was actually removed.
+    const blockedMessage =
+      "The database did not allow this delete. Check the table's delete policy.";
+
+    if (itemCount > 0) {
+      const { data, error } = await supabase
+        .from("deliverables")
+        .delete()
+        .in("folder_id", folderIds)
+        .select("id");
+      if (error || data.length === 0) {
+        alert(`Could not delete folder: ${error?.message || blockedMessage}`);
+        return;
+      }
+      setAssets((current) =>
+        current.filter(
+          (item) => !folderIds.some((id) => sameId(id, item.folder_id)),
+        ),
+      );
+    }
+
+    const { data, error } = await supabase
       .from("project_folders")
       .delete()
-      .eq("id", folder.id);
-    if (error) {
-      alert(`Could not delete folder: ${error.message}`);
+      .in("id", folderIds)
+      .select("id");
+    if (error || data.length === 0) {
+      alert(`Could not delete folder: ${error?.message || blockedMessage}`);
+      onRefresh?.();
       return;
     }
-    setFolders((current) => current.filter((entry) => entry.id !== folder.id));
+    setFolders((current) =>
+      current.filter(
+        (entry) => !folderIds.some((id) => sameId(id, entry.id)),
+      ),
+    );
     onRefresh?.();
   };
 
@@ -561,7 +821,8 @@ export default function ClientLibrary({
   const renderFolderCard = (folder) => (
     <div
       key={folder.id}
-      className="group relative flex min-h-28 flex-col justify-between rounded-lg border border-[#e5e5e2] bg-white p-4 transition hover:border-[#c9c9c4] hover:bg-[#fcfcfa]"
+      data-drop-folder={folder.id}
+      className={`group relative flex min-h-28 flex-col justify-between rounded-lg border bg-white p-4 transition hover:border-[#c9c9c4] hover:bg-[#fcfcfa] ${sameId(dropFolderKey, folder.id) ? "border-[#579dff] ring-2 ring-[#579dff]/30" : "border-[#e5e5e2]"}`}
     >
       <button
         type="button"
@@ -605,7 +866,7 @@ export default function ClientLibrary({
           type="button"
           onClick={() => deleteFolder(folder)}
           aria-label={`Delete ${folder.name}`}
-          title="Delete empty folder"
+          title="Delete folder"
           className="flex h-7 w-7 items-center justify-center rounded text-[#8a8a86] hover:bg-rose-50 hover:text-rose-600"
         >
           <Trash2 className="h-3.5 w-3.5" />
@@ -749,7 +1010,15 @@ export default function ClientLibrary({
     );
 
     return (
-      <div key={folder.id}>
+      <div
+        key={folder.id}
+        data-drop-folder={folder.id}
+        className={
+          sameId(dropFolderKey, folder.id)
+            ? "rounded-md ring-2 ring-[#579dff]/40"
+            : undefined
+        }
+      >
         <div
           className="group flex items-center gap-2 rounded-md py-1 text-[#37352f] hover:bg-[#ecece9]"
           style={{ paddingLeft: `${8 + Math.min(depth, 3) * 12}px` }}
@@ -808,7 +1077,7 @@ export default function ClientLibrary({
               type="button"
               onClick={() => deleteFolder(folder)}
               aria-label={`Delete ${folder.name}`}
-              title="Delete empty folder"
+              title="Delete folder"
               className="flex h-7 w-7 items-center justify-center rounded text-[#8a8a86] hover:bg-rose-50 hover:text-rose-600"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -834,7 +1103,13 @@ export default function ClientLibrary({
   };
 
   return (
-    <section className="min-w-0 space-y-4 pt-4 sm:pt-6">
+    <section
+      className={`min-w-0 space-y-4 rounded-lg pt-4 sm:pt-6 ${
+        dropFolderKey !== null && sameId(dropFolderKey, currentFolderId)
+          ? "outline-2 outline-offset-4 outline-dashed outline-[#579dff]"
+          : ""
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight text-[#30302e]">
@@ -1084,8 +1359,89 @@ export default function ClientLibrary({
         </div>
       )}
 
+      {dropFolderKey !== null && dropFolderName && (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-[100] flex max-w-[90vw] -translate-x-1/2 items-center gap-2 rounded-md bg-[#20201e] px-3 py-2 text-xs font-medium text-white shadow-lg">
+          <UploadCloud className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">Drop to upload to {dropFolderName}</span>
+        </div>
+      )}
+
+      {bulkUpload && (
+        <aside
+          aria-live="polite"
+          className="fixed bottom-24 right-6 z-[95] w-80 max-w-[calc(100vw-3rem)] space-y-2 rounded-lg border border-[#e5e5e2] bg-white p-3 shadow-2xl"
+        >
+          <div className="flex items-center gap-2">
+            {bulkUpload.isRunning ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#8a8a86]" />
+            ) : bulkUpload.failed.length > 0 ? (
+              <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+            )}
+            <p className="min-w-0 flex-1 text-xs font-medium text-[#30302e]">
+              {bulkUpload.isRunning
+                ? `Uploading ${bulkUpload.done} of ${bulkUpload.total} files`
+                : `${bulkUpload.uploaded} of ${bulkUpload.total} files uploaded`}
+            </p>
+            {!bulkUpload.isRunning && (
+              <button
+                type="button"
+                onClick={() => setBulkUpload(null)}
+                aria-label="Dismiss upload summary"
+                className="text-[#9a9a96] hover:text-[#30302e]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="h-1 overflow-hidden rounded-full bg-[#f0f0ed]">
+            <div
+              className="h-full rounded-full bg-[#20201e] transition-[width]"
+              style={{
+                width: `${bulkUpload.total ? (bulkUpload.done / bulkUpload.total) * 100 : 100}%`,
+              }}
+            />
+          </div>
+          {bulkUpload.skipped > 0 && (
+            <p className="text-[10px] text-[#8a8a86]">
+              Skipped {bulkUpload.skipped} system{" "}
+              {bulkUpload.skipped === 1 ? "item" : "items"} (e.g. Thumbs.db,
+              .DS_Store).
+            </p>
+          )}
+          {bulkUpload.failed.length > 0 && (
+            <ul className="max-h-32 space-y-1 overflow-y-auto border-t border-[#f0f0ec] pt-2">
+              {bulkUpload.failed.map((item) => (
+                <li key={item.label} className="text-[10px]">
+                  <span className="block truncate font-medium text-rose-700">
+                    {item.label}
+                  </span>
+                  <span className="block truncate text-[#8a8a86]">
+                    {item.message}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!bulkUpload.isRunning &&
+            bulkUpload.failed.some((item) => item.planFile) && (
+              <button
+                type="button"
+                onClick={retryFailedUploads}
+                className="h-7 w-full rounded-md border border-[#e5e5e2] text-[11px] font-medium text-[#5f5f5b] hover:bg-[#f7f7f5]"
+              >
+                Retry failed files
+              </button>
+            )}
+        </aside>
+      )}
+
       {isAssetModalOpen && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4">
+        <div
+          data-drop-folder={assetFolderId || "root"}
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4"
+        >
           <form
             onSubmit={saveAsset}
             className="max-h-[calc(100dvh-2rem)] w-full max-w-md space-y-4 overflow-y-auto rounded-lg border border-[#e5e5e2] bg-white p-5 shadow-2xl"
@@ -1103,7 +1459,7 @@ export default function ClientLibrary({
               <p className="mt-1 text-xs text-[#787774]">
                 {documentsMode
                   ? "Add a document to this project."
-                  : "Upload a file or save a link in a folder."}
+                  : "Upload a file or a whole folder, or save a link."}
               </p>
             </div>
             {!documentsMode && (
@@ -1111,6 +1467,7 @@ export default function ClientLibrary({
                 {[
                   ["link", "Link"],
                   ["file", "File"],
+                  ...(editingAsset ? [] : [["folder", "Folder"]]),
                 ].map(([type, label]) => (
                   <button
                     key={type}
@@ -1123,18 +1480,20 @@ export default function ClientLibrary({
                 ))}
               </div>
             )}
-            <label className="block space-y-1 text-xs font-medium text-[#5f5f5b]">
-              <span>Name</span>
-              <input
-                required
-                value={assetTitle}
-                onChange={(event) => setAssetTitle(event.target.value)}
-                className="h-9 w-full rounded-md border border-[#e5e5e2] px-3 text-xs outline-none focus:border-[#579dff]"
-              />
-            </label>
+            {assetType !== "folder" && (
+              <label className="block space-y-1 text-xs font-medium text-[#5f5f5b]">
+                <span>Name</span>
+                <input
+                  required
+                  value={assetTitle}
+                  onChange={(event) => setAssetTitle(event.target.value)}
+                  className="h-9 w-full rounded-md border border-[#e5e5e2] px-3 text-xs outline-none focus:border-[#579dff]"
+                />
+              </label>
+            )}
             {!documentsMode && (
               <label className="block space-y-1 text-xs font-medium text-[#5f5f5b]">
-                <span>Folder</span>
+                <span>{assetType === "folder" ? "Upload into" : "Folder"}</span>
                 <select
                   value={assetFolderId || "root"}
                   onChange={(event) =>
@@ -1165,6 +1524,23 @@ export default function ClientLibrary({
                   className="h-9 w-full rounded-md border border-[#e5e5e2] px-3 text-xs outline-none focus:border-[#579dff]"
                 />
               </label>
+            ) : assetType === "folder" ? (
+              <label className="flex cursor-pointer flex-col items-center gap-2 rounded-md border border-dashed border-[#c9c9c4] bg-[#fafaf8] px-4 py-8 text-center transition hover:border-[#579dff] focus-within:border-[#579dff]">
+                <input
+                  type="file"
+                  webkitdirectory=""
+                  multiple
+                  onChange={handleFolderPicked}
+                  className="sr-only"
+                />
+                <FolderOpen className="h-7 w-7 fill-[#dededb] text-[#c9c9c6]" />
+                <span className="text-xs font-medium text-[#30302e]">
+                  Drag a folder here, or click to choose one
+                </span>
+                <span className="text-[10px] text-[#8a8a86]">
+                  Its files and subfolders upload with the same structure.
+                </span>
+              </label>
             ) : (
               <label className="block space-y-1 text-xs font-medium text-[#5f5f5b]">
                 <span>
@@ -1194,22 +1570,24 @@ export default function ClientLibrary({
               >
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={isSaving}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#20201e] px-3 text-xs font-medium text-white disabled:opacity-60"
-              >
-                {isSaving ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <UploadCloud className="h-3.5 w-3.5" />
-                )}
-                {editingAsset
-                  ? "Save changes"
-                  : documentsMode
-                    ? "Upload document"
-                    : "Upload"}
-              </button>
+              {assetType !== "folder" && (
+                <button
+                  type="submit"
+                  disabled={isSaving}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#20201e] px-3 text-xs font-medium text-white disabled:opacity-60"
+                >
+                  {isSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <UploadCloud className="h-3.5 w-3.5" />
+                  )}
+                  {editingAsset
+                    ? "Save changes"
+                    : documentsMode
+                      ? "Upload document"
+                      : "Upload"}
+                </button>
+              )}
             </div>
           </form>
         </div>
